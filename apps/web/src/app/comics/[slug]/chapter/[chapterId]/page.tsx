@@ -41,7 +41,5 @@ export default async function ChapterPage({ params }: Props) {
   if (meta.comic.slug !== params.slug) notFound();
   return <><Track type="CHAPTER_VIEW" comicId={meta.comic.id} chapterId={meta.id} /><Reader key={meta.id} slug={params.slug} meta={meta} initial={first.items} chapters={chapters} /></>;
 }
-];
-}
 
 export const dynamic = "force-dynamic";
