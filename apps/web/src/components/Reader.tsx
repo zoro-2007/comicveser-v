@@ -85,7 +85,11 @@ export default function Reader({ slug, meta, initial, chapters, external, source
     if (busy.current || imagesRef.current.length >= meta.imageCount) return;
     busy.current = true; setLoadError(false);
     try {
-      const r = await fetch(`${API}/chapters/${meta.id}/images?from=${imagesRef.current.length}&limit=${BATCH}`);
+      let r = await fetch(`${API}/chapters/${meta.id}/images?from=${imagesRef.current.length}&limit=${BATCH}`, { credentials: "include", headers: buildAuthHeaders() });
+      if (!r.ok && r.status >= 500) {
+        await new Promise((res) => setTimeout(res, 800));
+        r = await fetch(`${API}/chapters/${meta.id}/images?from=${imagesRef.current.length}&limit=${BATCH}`, { credentials: "include", headers: buildAuthHeaders() });
+      }
       if (!r.ok) throw new Error("Could not load chapter images");
       const d: ImgPage = await r.json();
       imagesRef.current = [...imagesRef.current, ...d.items]; setImages(imagesRef.current);

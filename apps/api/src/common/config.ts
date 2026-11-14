@@ -60,7 +60,6 @@ export function isOriginAllowed(origin: string | undefined): boolean {
     const incomingUrl = new URL(normalized);
     const incomingHost = incomingUrl.hostname.toLowerCase();
 
-    // Support wildcard patterns in WEB_ORIGIN (e.g. https://*.vercel.app) and matching Vercel preview deployments
     for (const entry of allowed) {
       if (entry.includes("*")) {
         const pattern =
@@ -77,8 +76,6 @@ export function isOriginAllowed(origin: string | undefined): boolean {
       try {
         const allowedUrl = new URL(entry);
         const allowedHost = allowedUrl.hostname.toLowerCase();
-        // If a production .vercel.app domain is configured (e.g. https://comicverse.vercel.app),
-        // automatically allow Vercel branch/preview deployments for the same project (https://comicverse-*.vercel.app)
         if (
           allowedUrl.protocol === incomingUrl.protocol &&
           allowedHost.endsWith(".vercel.app") &&
@@ -102,7 +99,6 @@ export function isOriginAllowed(origin: string | undefined): boolean {
       return true;
     }
 
-    // Allow matching subdomains when COOKIE_DOMAIN is configured
     const cookieDomain = process.env.COOKIE_DOMAIN?.trim().replace(/^\./, "");
     if (cookieDomain) {
       if (incomingHost === cookieDomain || incomingHost.endsWith(`.${cookieDomain}`)) {

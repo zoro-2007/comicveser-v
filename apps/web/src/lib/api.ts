@@ -125,23 +125,44 @@ export async function api<T = any>(
     ...(rest.headers || {}),
   };
   const headers = buildAuthHeaders(baseHeaders);
+  const method = (rest.method ?? "GET").toUpperCase();
+  const canRetry = (method === "GET" || method === "HEAD") && !rest.signal;
 
-  const controller = !rest.signal && typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timeoutId = controller ? setTimeout(() => controller.abort(), 15_000) : null;
+  const performFetch = async (timeoutMs: number): Promise<Response> => {
+    const controller = !rest.signal && typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      return await fetch(`${serverBase()}${normalizedPath}`, {
+        ...rest,
+        signal: rest.signal ?? controller?.signal,
+        credentials: rest.credentials ?? "include",
+        headers,
+        body: json !== undefined ? JSON.stringify(json) : rest.body,
+        ...((rest as any).next ? {} : { cache: rest.cache ?? "no-store" }),
+      });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  };
+
   let res: Response;
   try {
-    res = await fetch(`${serverBase()}${normalizedPath}`, {
-      ...rest,
-      signal: rest.signal ?? controller?.signal,
-      credentials: rest.credentials ?? "include",
-      headers,
-      body: json !== undefined ? JSON.stringify(json) : rest.body,
-      ...((rest as any).next ? {} : { cache: rest.cache ?? "no-store" }),
-    });
+    res = await performFetch(45_000);
+    if (canRetry && res.status >= 500 && res.status <= 504) {
+      await new Promise((r) => setTimeout(r, 800));
+      res = await performFetch(45_000);
+    }
   } catch {
-    throw new ApiError(0, "Can't reach the server. Check your connection and try again.");
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    if (canRetry) {
+      try {
+        await new Promise((r) => setTimeout(r, 800));
+        res = await performFetch(45_000);
+      } catch {
+        throw new ApiError(0, "Can't reach the server. Check your connection and try again.");
+      }
+    } else {
+      throw new ApiError(0, "Can't reach the server. Check your connection and try again.");
+    }
   }
 
   if (res.status === 204) return undefined as T;

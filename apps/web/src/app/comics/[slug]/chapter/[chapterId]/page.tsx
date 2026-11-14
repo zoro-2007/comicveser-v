@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import Track from "@/components/Track";
@@ -7,6 +8,7 @@ import type { ExtPages } from "@/lib/sources";
 
 type Props = { params: { slug: string; chapterId: string } };
 export const metadata: Metadata = { title: "Reader" };
+export const dynamic = "force-dynamic";
 
 export default async function ChapterPage({ params }: Props) {
   let meta: ChapterMeta, first: ImgPage, chapters: { id: string; number: number }[];
@@ -15,7 +17,10 @@ export default async function ChapterPage({ params }: Props) {
     if (meta.external) {
       const { sourceId, mangaId, chapterId } = meta.external;
       try {
-        const pages = await api<ExtPages>(`/sources/${encodeURIComponent(sourceId)}/manga/${encodeURIComponent(mangaId)}/chapters/${encodeURIComponent(chapterId)}/pages`, { cache: "no-store" });
+        const pages = await api<ExtPages>(
+          `/sources/${encodeURIComponent(sourceId)}/manga/${encodeURIComponent(mangaId)}/chapters/${encodeURIComponent(chapterId)}/pages`,
+          { cache: "no-store" },
+        );
         first = {
           total: pages.pages.length,
           items: pages.pages.map((page) => ({
@@ -34,12 +39,41 @@ export default async function ChapterPage({ params }: Props) {
     } else {
       first = await api<ImgPage>(`/chapters/${params.chapterId}/images?from=0&limit=10`, { cache: "no-store" });
     }
-    chapters = await api(`/comics/${meta.comic.id}/chapters?order=asc`, { cache: "no-store" });
+    chapters = await api(`/comics/${meta.comic.id}/chapters?order=asc`, { cache: "no-store" }).catch(() => []);
   } catch (e) {
-    notFound();
+    if (e instanceof ApiError && e.status === 404) {
+      notFound();
+    }
+    const msg =
+      e instanceof ApiError && e.message
+        ? e.message
+        : "The server took too long to respond while loading this chapter.";
+    return (
+      <div className="mx-auto max-w-xl px-4 py-24 text-center">
+        <h1 className="text-xl font-bold">Couldn&apos;t load chapter right now</h1>
+        <p className="mt-2 text-sm text-muted">{msg}</p>
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
+          <Link
+            href={`/comics/${params.slug}/chapter/${params.chapterId}`}
+            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white"
+          >
+            Try again
+          </Link>
+          <Link
+            href={`/comics/${params.slug}`}
+            className="rounded-md border border-line px-4 py-2 text-sm font-semibold"
+          >
+            Back to comic
+          </Link>
+        </div>
+      </div>
+    );
   }
   if (meta.comic.slug !== params.slug) notFound();
-  return <><Track type="CHAPTER_VIEW" comicId={meta.comic.id} chapterId={meta.id} /><Reader key={meta.id} slug={params.slug} meta={meta} initial={first.items} chapters={chapters} /></>;
+  return (
+    <>
+      <Track type="CHAPTER_VIEW" comicId={meta.comic.id} chapterId={meta.id} />
+      <Reader key={meta.id} slug={params.slug} meta={meta} initial={first.items} chapters={chapters} />
+    </>
+  );
 }
-
-export const dynamic = "force-dynamic";

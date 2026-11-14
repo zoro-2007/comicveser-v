@@ -341,5 +341,7 @@ export default async function ExternalRead({
     />
   );
 }
+];
+}
 
 export const dynamic = "force-dynamic";

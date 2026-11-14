@@ -12,8 +12,6 @@ services:
         value: "1"
       - key: COOKIE_SAMESITE
         value: none
-      - key: ALLOW_VERCEL_ORIGINS
-        value: "true"
       - key: SOURCES_ENABLED
         value: "true"
       - key: SOURCE_SYNC_ENABLED

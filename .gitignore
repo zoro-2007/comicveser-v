@@ -12,18 +12,10 @@ dist/
 !apps/api/vendor/node_modules/**/dist/
 *.tsbuildinfo
 
-# Environment files (keep only safe templates)
+# Env
 .env
-.env.*
-**/.env
-**/.env.*
-!.env.example
-!.env.test.example
-!**/.env.example
-!**/.env.test.example
-
-# Local database exports
-dump.sql
+.env.local
+.env.*.local
 
 # Misc
 .DS_Store

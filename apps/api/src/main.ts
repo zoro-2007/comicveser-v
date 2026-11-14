@@ -38,12 +38,6 @@ export async function createConfiguredApp(): Promise<NestExpressApplication> {
         reportOnly: true,
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "https://accounts.google.com", "https://apis.google.com"],
-          styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://accounts.google.com"],
-          fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
-          imgSrc: ["'self'", "data:", "blob:", "https:"],
-          connectSrc: ["'self'", "https:", "http://localhost:4000"],
-          frameSrc: ["https://accounts.google.com", "https://www.google.com"],
           frameAncestors: ["'none'"],
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
