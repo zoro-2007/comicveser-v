@@ -12,9 +12,7 @@ import { assertProductionConfig, isOriginAllowed, isProd } from "./common/config
 import { AllExceptionsFilter } from "./common/errors";
 import { NestExpressApplication } from "@nestjs/platform-express";
 
-let cachedServer: any = null;
-
-export async function createConfiguredApp(): Promise<NestExpressApplication> {
+async function bootstrap() {
   assertProductionConfig();
   const app = await NestFactory.create<NestExpressApplication>(
     AppModule,
@@ -71,23 +69,6 @@ export async function createConfiguredApp(): Promise<NestExpressApplication> {
       SwaggerModule.createDocument(app, new DocumentBuilder().setTitle("ComicVerse API").setVersion("1.0").build()),
     );
   }
-  return app;
-}
-
-export async function getServerlessHandler() {
-  if (!cachedServer) {
-    const app = await createConfiguredApp();
-    await app.init();
-    cachedServer = app.getHttpAdapter().getInstance();
-  }
-  return cachedServer;
-}
-
-async function bootstrap() {
-  const app = await createConfiguredApp();
   await app.listen(process.env.PORT ?? 4000);
 }
-
-if (!process.env.VERCEL) {
-  bootstrap();
-}
+bootstrap();

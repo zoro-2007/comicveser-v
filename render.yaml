@@ -5,6 +5,7 @@ services:
     rootDir: apps/api
     buildCommand: npm install --include=dev && npx prisma generate && npm run build && node scripts/resolve-migrations.js
     startCommand: npm run start:prod
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
@@ -12,6 +13,8 @@ services:
         value: "1"
       - key: COOKIE_SAMESITE
         value: none
+      - key: ALLOW_VERCEL_ORIGINS
+        value: "true"
       - key: SOURCES_ENABLED
         value: "true"
       - key: SOURCE_SYNC_ENABLED
@@ -33,20 +36,4 @@ services:
       - key: RESEND_API_KEY
         sync: false
       - key: MAIL_FROM
-        sync: false
-
-  - type: web
-    name: comicverse-web
-    runtime: node
-    rootDir: apps/web
-    buildCommand: npm install --include=dev && npm run build
-    startCommand: npm run start
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: NEXT_PUBLIC_API_URL
-        sync: false
-      - key: NEXT_PUBLIC_SITE_URL
-        sync: false
-      - key: NEXT_PUBLIC_GOOGLE_CLIENT_ID
         sync: false
