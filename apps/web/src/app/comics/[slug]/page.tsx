@@ -156,5 +156,4 @@ export default async function ComicPage({ params }: Props) {
   );
 }
 
-
 export const dynamic = "force-dynamic";
