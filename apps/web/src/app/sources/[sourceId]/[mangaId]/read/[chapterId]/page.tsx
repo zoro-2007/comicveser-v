@@ -341,7 +341,7 @@ export default async function ExternalRead({
     />
   );
 }
-
-export function generateStaticParams() {
-  return [{ sourceId: 'default', mangaId: 'default', chapterId: '1' }];
+];
 }
+
+export const dynamic = "force-dynamic";

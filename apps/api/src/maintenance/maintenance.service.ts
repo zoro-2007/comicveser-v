@@ -19,7 +19,7 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    if (process.env.DISABLE_JOBS === "true") return;
+    if (process.env.DISABLE_JOBS === "true" || process.env.VERCEL === "1") return;
     const every = (ms: number, fn: () => Promise<unknown>, name: string) => {
       const t = setInterval(() => fn().catch((e) => this.log.error(`${name}: ${e.message}`)), ms);
       t.unref();

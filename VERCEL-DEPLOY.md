@@ -1,13 +1,41 @@
-# Host the web app on Vercel, keep the API on Render
+# Deploying ComicVerse on Vercel
 
-Why: some networks cannot reach Render's IP range. Vercel uses different addresses, and with the proxy below the browser talks
-only to the Vercel address (the API is called server-to-server), which also removes cross-site cookie problems.
+ComicVerse is pre-configured to deploy on Vercel either from the **repository root (`.`)** or with **Root Directory set to `apps/web`** (and optionally `apps/api` as a separate Vercel serverless project).
 
-1. vercel.com -> Add New Project -> import the GitHub repo.
-2. Root Directory: `apps/web`. Framework: Next.js (auto). Node 20.
-3. Environment variables (Production):
+## Option 1 (Recommended): Web App on Vercel + API on Render
+
+Hosting the Next.js web app (`apps/web`) on Vercel with the built-in `/api` proxy means the browser talks only to your `.vercel.app` domain (eliminating cross-site cookie blocking and Render IP range blocks).
+
+1. **Import into Vercel**:
+   - Open [vercel.com/new](https://vercel.com/new) and import your GitHub repository (or upload the project).
+   - **Root Directory**: You can either leave it at the repository root (`.` — handled automatically by the root `vercel.json`) or set it to `apps/web` (handled by `apps/web/vercel.json`).
+   - **Framework Preset**: Next.js (auto-detected).
+
+2. **Configure Vercel Environment Variables (Production & Preview)**:
    - `NEXT_PUBLIC_API_URL` = `/api`
-   - `API_INTERNAL_URL`   = `https://<your-api>.onrender.com/api`
-4. Deploy. You get `https://<project>.vercel.app`.
-5. Render API service -> `WEB_ORIGIN` = `https://<project>.vercel.app` (comma-separate to keep the old Render web URL), then redeploy.
-6. Test on the restricted network: `https://<project>.vercel.app`, then log in and open /admin.
+   - `API_INTERNAL_URL` = `https://<your-api-service>.onrender.com/api` *(even if you omit `/api`, `next.config.mjs` and `src/lib/api.ts` normalize it automatically)*
+   - `NEXT_PUBLIC_SITE_URL` = `https://<your-project>.vercel.app` *(optional — auto-detected from `VERCEL_PROJECT_PRODUCTION_URL` / `VERCEL_URL` if omitted)*
+   - `NEXT_PUBLIC_GOOGLE_CLIENT_ID` = `<your-google-oauth-client-id>` *(optional, if using Google Sign-In)*
+
+3. **Deploy on Vercel**:
+   - Click **Deploy**. Your app will be live at `https://<your-project>.vercel.app`.
+
+4. **Update Render API Environment Variables**:
+   - In your Render `comicverse-api` service, set:
+     - `WEB_ORIGIN` = `https://<your-project>.vercel.app` *(comma-separated if keeping additional origins; Vercel preview URLs `https://<your-project>-*.vercel.app` are allowed automatically)*
+     - `ALLOW_VERCEL_ORIGINS` = `true`
+
+## Option 2: Deploying the Backend API (`apps/api`) on Vercel Serverless
+
+If you also want to host the NestJS API on Vercel instead of Render:
+
+1. Create a second project in Vercel and import the same repository.
+2. Set **Root Directory** to `apps/api` (uses `apps/api/vercel.json` and the serverless handler at `apps/api/api/index.js`).
+3. Set Environment Variables on the Vercel API project:
+   - `NODE_ENV` = `production`
+   - `DATABASE_URL` = `<your-postgresql-connection-string>`
+   - `WEB_ORIGIN` = `https://<your-web-project>.vercel.app`
+   - `ALLOW_VERCEL_ORIGINS` = `true`
+   - `COOKIE_SAMESITE` = `none`
+   - `TRUST_PROXY` = `1`
+4. Set `API_INTERNAL_URL` on your Vercel Web project to `https://<your-api-project>.vercel.app/api`.

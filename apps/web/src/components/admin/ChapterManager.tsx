@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Badge, State, btn, btnDanger, btnGhost } from "./ui";
-import { API } from "@/lib/api";
+import { API, buildAuthHeaders } from "@/lib/api";
 import { act, errMsg, useLoad } from "@/lib/useApi";
 
 const OK = ["image/jpeg", "image/png", "image/webp", "image/avif"], MAX = 10 * 1024 * 1024;
@@ -53,7 +53,7 @@ export default function ChapterManager({ id, mode }: { id: string; mode: "admin"
     if (file.size > 100 * 1024 * 1024) throw new Error("ZIP is larger than 100 MB.");
     if (file.size === 0) throw new Error("The selected ZIP file is empty.");
     const fd = new FormData(); fd.append("file", file, file.name);
-    const r = await fetch(`${API}/admin/chapters/${id}/bulk`, { method: "POST", body: fd, credentials: "include" });
+    const r = await fetch(`${API}/admin/chapters/${id}/bulk`, { method: "POST", body: fd, credentials: "include", headers: buildAuthHeaders() });
     const b = await r.json().catch(() => null);
     if (!r.ok) {
       const message = b?.error?.message ?? b?.message ?? `ZIP import failed (HTTP ${r.status}).`;

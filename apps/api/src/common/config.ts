@@ -29,7 +29,13 @@ export function webOrigins(): string[] {
   }
 
   if (configured.length === 0) {
-    configured.push("http://localhost:3000");
+    if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+      configured.push(`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`);
+    } else if (process.env.VERCEL_URL) {
+      configured.push(`https://${process.env.VERCEL_URL}`);
+    } else {
+      configured.push("http://localhost:3000");
+    }
   }
   return configured;
 }
@@ -50,17 +56,61 @@ export function isOriginAllowed(origin: string | undefined): boolean {
   const allowed = webOrigins();
   if (allowed.includes(normalized)) return true;
 
-  // Allow matching subdomains when COOKIE_DOMAIN is configured
-  const cookieDomain = process.env.COOKIE_DOMAIN?.trim().replace(/^\./, "");
-  if (cookieDomain) {
-    try {
-      const url = new URL(normalized);
-      if (url.hostname === cookieDomain || url.hostname.endsWith(`.${cookieDomain}`)) {
+  try {
+    const incomingUrl = new URL(normalized);
+    const incomingHost = incomingUrl.hostname.toLowerCase();
+
+    // Support wildcard patterns in WEB_ORIGIN (e.g. https://*.vercel.app) and matching Vercel preview deployments
+    for (const entry of allowed) {
+      if (entry.includes("*")) {
+        const pattern =
+          "^" +
+          entry
+            .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+            .replace(/\*/g, "[a-zA-Z0-9-]+") +
+          "$";
+        if (new RegExp(pattern, "i").test(normalized)) {
+          return true;
+        }
+        continue;
+      }
+      try {
+        const allowedUrl = new URL(entry);
+        const allowedHost = allowedUrl.hostname.toLowerCase();
+        // If a production .vercel.app domain is configured (e.g. https://comicverse.vercel.app),
+        // automatically allow Vercel branch/preview deployments for the same project (https://comicverse-*.vercel.app)
+        if (
+          allowedUrl.protocol === incomingUrl.protocol &&
+          allowedHost.endsWith(".vercel.app") &&
+          incomingHost.endsWith(".vercel.app")
+        ) {
+          const projectSlug = allowedHost.slice(0, -".vercel.app".length);
+          if (projectSlug && incomingHost.startsWith(`${projectSlug}-`)) {
+            return true;
+          }
+        }
+      } catch {
+        // Ignore malformed entry
+      }
+    }
+
+    if (
+      (process.env.ALLOW_VERCEL_ORIGINS === "true" || process.env.VERCEL === "1") &&
+      incomingUrl.protocol === "https:" &&
+      incomingHost.endsWith(".vercel.app")
+    ) {
+      return true;
+    }
+
+    // Allow matching subdomains when COOKIE_DOMAIN is configured
+    const cookieDomain = process.env.COOKIE_DOMAIN?.trim().replace(/^\./, "");
+    if (cookieDomain) {
+      if (incomingHost === cookieDomain || incomingHost.endsWith(`.${cookieDomain}`)) {
         return true;
       }
-    } catch {
-      return false;
     }
+  } catch {
+    return false;
   }
   return false;
 }

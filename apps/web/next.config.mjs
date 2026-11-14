@@ -12,6 +12,21 @@ try {
   }
 } catch {}
 
+function normalizeApiTarget(raw) {
+  if (!raw) return "";
+  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(trimmed)) return "";
+  try {
+    const u = new URL(trimmed);
+    if (u.pathname === "" || u.pathname === "/") {
+      u.pathname = "/api";
+    }
+    return u.toString().replace(/\/+$/, "");
+  } catch {
+    return trimmed;
+  }
+}
+
 /** @type {import('next').NextConfig} */
 const securityHeaders = [
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
@@ -47,7 +62,12 @@ const nextConfig = {
     ];
   },
   async rewrites() {
-    const target = process.env.API_INTERNAL_URL?.replace(/\/+$/, "");
+    const rawTarget =
+      process.env.API_INTERNAL_URL ||
+      process.env.BACKEND_URL ||
+      process.env.API_URL ||
+      (/^https?:\/\//i.test(process.env.NEXT_PUBLIC_API_URL || "") ? process.env.NEXT_PUBLIC_API_URL : "");
+    const target = normalizeApiTarget(rawTarget);
     return target ? [{ source: "/api/:path*", destination: `${target}/:path*` }] : [];
   },
 };

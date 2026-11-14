@@ -155,7 +155,7 @@ export default async function ComicPage({ params }: Props) {
     </article>
   );
 }
-
-export function generateStaticParams() {
-  return [{ slug: "default" }];
+];
 }
+
+export const dynamic = "force-dynamic";

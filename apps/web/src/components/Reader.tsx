@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { API } from "@/lib/api";
+import { API, buildAuthHeaders } from "@/lib/api";
 import { track } from "@/lib/analytics";
 import { useReadChapters } from "@/lib/useReadChapters";
 import type { AlternativeSourceMatch } from "@/lib/sources";
@@ -168,7 +168,7 @@ export default function Reader({ slug, meta, initial, chapters, external, source
       let saved: { chapterId: string; imageIndex: number } | null = null;
       try {
         if (external) throw new Error("external chapters keep progress locally");
-        const r = await fetch(`${API}/user/history`, { credentials: "include" });
+        const r = await fetch(`${API}/user/history`, { credentials: "include", headers: buildAuthHeaders() });
         authed.current = r.ok;
         if (r.ok) { const h = (await r.json()).find((x: any) => x.comic.id === meta.comic.id); if (h) saved = { chapterId: h.chapter.id, imageIndex: h.imageIndex }; }
       } catch {}
@@ -193,7 +193,7 @@ export default function Reader({ slug, meta, initial, chapters, external, source
       const p = { comicId: meta.comic.id, chapterId: meta.id, imageIndex: current, scrollY: Math.round(window.scrollY) };
       try { localStorage.setItem(localKey, JSON.stringify(p)); } catch {}
       if (authed.current === false || external) return;
-      try { const r = await fetch(`${API}/user/progress`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }); if (r.status === 401) authed.current = false; } catch {}
+      try { const r = await fetch(`${API}/user/progress`, { method: "POST", credentials: "include", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(p) }); if (r.status === 401) authed.current = false; } catch {}
     }, 2000);
     return () => clearTimeout(timer.current);
   }, [current, meta.comic.id, meta.id, localKey]); // eslint-disable-line react-hooks/exhaustive-deps

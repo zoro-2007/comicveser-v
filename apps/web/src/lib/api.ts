@@ -1,4 +1,34 @@
-export const API = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api").replace(/\/+$/, "");
+function normalizeApiBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const u = new URL(trimmed);
+      if (u.pathname === "" || u.pathname === "/") {
+        u.pathname = "/api";
+      }
+      return u.toString().replace(/\/+$/, "");
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+const configuredPublicApi = process.env.NEXT_PUBLIC_API_URL
+  ? normalizeApiBase(process.env.NEXT_PUBLIC_API_URL)
+  : "";
+
+export const API = (
+  configuredPublicApi ||
+  (typeof window !== "undefined" &&
+  window.location.hostname !== "localhost" &&
+  window.location.hostname !== "127.0.0.1"
+    ? "/api"
+    : process.env.VERCEL
+    ? "/api"
+    : "http://localhost:4000/api")
+).replace(/\/+$/, "");
 
 export const UNAUTHORIZED_EVENT = "cv:unauthorized";
 
@@ -57,10 +87,30 @@ export class ApiError extends Error {
   }
 }
 
-const serverBase = () =>
-  typeof window === "undefined" && process.env.API_INTERNAL_URL
-    ? process.env.API_INTERNAL_URL.replace(/\/+$/, "")
-    : API;
+const serverBase = () => {
+  if (typeof window === "undefined") {
+    const internal =
+      process.env.API_INTERNAL_URL ||
+      process.env.BACKEND_URL ||
+      process.env.API_URL;
+    if (internal) {
+      return normalizeApiBase(internal);
+    }
+    if (/^https?:\/\//i.test(API)) {
+      return API;
+    }
+    const siteOrigin = (
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      (process.env.VERCEL_PROJECT_PRODUCTION_URL
+        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+        : "") ||
+      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "") ||
+      `http://localhost:${process.env.PORT || 4000}`
+    ).replace(/\/+$/, "");
+    return `${siteOrigin}${API.startsWith("/") ? API : `/${API}`}`;
+  }
+  return API;
+};
 
 export async function api<T = any>(
   path: string,
