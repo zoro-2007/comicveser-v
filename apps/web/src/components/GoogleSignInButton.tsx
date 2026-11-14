@@ -37,9 +37,19 @@ interface GoogleSignInButtonProps {
   onError: (message: string) => void;
 }
 
+type GoogleCredentialResponse = { credential?: string };
+
+// Google Identity Services has one global initialize() configuration per page.
+// Keep the callback replaceable so React re-renders/Strict Mode do not initialize
+// the SDK repeatedly or leave it holding callbacks from an unmounted component.
+let initializedGoogleClientId: string | null = null;
+let activeGoogleCredentialHandler: ((response: GoogleCredentialResponse) => void) | null = null;
+
 export default function GoogleSignInButton({ mode, onSuccess, onError }: GoogleSignInButtonProps) {
   const auth = useAuth();
   const containerRef = useRef<HTMLDivElement>(null);
+  const callbacksRef = useRef({ auth, onSuccess, onError });
+  callbacksRef.current = { auth, onSuccess, onError };
   const [clientId, setClientId] = useState<string | null>(
     process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID?.trim() || null,
   );
@@ -47,15 +57,13 @@ export default function GoogleSignInButton({ mode, onSuccess, onError }: GoogleS
   const [submitting, setSubmitting] = useState(false);
   const [renderedGsi, setRenderedGsi] = useState(false);
 
-  // Discover GOOGLE_CLIENT_ID from backend if not baked into NEXT_PUBLIC_GOOGLE_CLIENT_ID
+  // Discover GOOGLE_CLIENT_ID from backend if not baked into NEXT_PUBLIC_GOOGLE_CLIENT_ID.
   useEffect(() => {
     if (clientId) return;
     let active = true;
     api<{ googleEnabled: boolean; googleClientId: string | null }>("/auth/config")
       .then((cfg) => {
-        if (active && cfg?.googleClientId) {
-          setClientId(cfg.googleClientId);
-        }
+        if (active && cfg?.googleClientId) setClientId(cfg.googleClientId);
       })
       .catch(() => {});
     return () => {
@@ -63,61 +71,78 @@ export default function GoogleSignInButton({ mode, onSuccess, onError }: GoogleS
     };
   }, [clientId]);
 
-  // Load Google Identity Services script
+  // Load Google Identity Services once. The callback below always reads the latest
+  // component handlers from callbacksRef, so it remains valid after re-renders.
   useEffect(() => {
     if (!clientId || typeof window === "undefined") return;
     if (window.google?.accounts?.id) {
       setScriptReady(true);
       return;
     }
+
     const existingScript = document.querySelector<HTMLScriptElement>(
       'script[src="https://accounts.google.com/gsi/client"]',
     );
     if (existingScript) {
       const onLoad = () => setScriptReady(true);
       existingScript.addEventListener("load", onLoad);
+      if (window.google?.accounts?.id) setScriptReady(true);
       return () => existingScript.removeEventListener("load", onLoad);
     }
+
     const script = document.createElement("script");
     script.src = "https://accounts.google.com/gsi/client";
     script.async = true;
     script.defer = true;
     script.onload = () => setScriptReady(true);
-    script.onerror = () => onError("Could not load Google Sign-In script. Check your internet connection.");
+    script.onerror = () => callbacksRef.current.onError(
+      "Could not load Google Sign-In script. Check your internet connection.",
+    );
     document.head.appendChild(script);
-  }, [clientId, onError]);
+    return () => {
+      script.onerror = null;
+    };
+  }, [clientId]);
 
-  // Initialize and render the Google Identity Services button
+  // Initialize Google once per client ID. Re-rendering the login form or changing
+  // AuthProvider state must not call google.accounts.id.initialize() again.
   useEffect(() => {
     if (!clientId || !scriptReady || !containerRef.current || !window.google?.accounts?.id) return;
+
+    const credentialHandler = async (response: GoogleCredentialResponse) => {
+      const latest = callbacksRef.current;
+      if (!response?.credential) {
+        latest.onError("Google Sign-In was cancelled or did not return a credential.");
+        return;
+      }
+      setSubmitting(true);
+      latest.onError("");
+      try {
+        const res = await api<{ ok: boolean; token?: string; user?: User }>("/auth/google", {
+          method: "POST",
+          body: JSON.stringify({ credential: response.credential }),
+        });
+        const loggedInUser = await latest.auth.applyLogin(res?.user ?? null, res?.token ?? null);
+        latest.onSuccess(loggedInUser);
+      } catch (err) {
+        latest.onError((err as Error).message || "Google authentication failed.");
+      } finally {
+        setSubmitting(false);
+      }
+    };
+    activeGoogleCredentialHandler = credentialHandler;
+
     try {
-      window.google.accounts.id.initialize({
-        client_id: clientId,
-        ux_mode: "popup",
-        callback: async (response) => {
-          if (!response?.credential) {
-            onError("Google Sign-In was cancelled or did not return a credential.");
-            return;
-          }
-          setSubmitting(true);
-          onError("");
-          try {
-            const res = await api<{ ok: boolean; token?: string; user?: User; isNewUser?: boolean }>(
-              "/auth/google",
-              {
-                method: "POST",
-                body: JSON.stringify({ credential: response.credential }),
-              },
-            );
-            const loggedInUser = await auth.applyLogin(res?.user ?? null, res?.token ?? null);
-            onSuccess(loggedInUser);
-          } catch (err) {
-            onError((err as Error).message || "Google authentication failed.");
-          } finally {
-            setSubmitting(false);
-          }
-        },
-      });
+      if (initializedGoogleClientId !== clientId) {
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          ux_mode: "popup",
+          callback: (response) => {
+            void activeGoogleCredentialHandler?.(response);
+          },
+        });
+        initializedGoogleClientId = clientId;
+      }
       containerRef.current.innerHTML = "";
       window.google.accounts.id.renderButton(containerRef.current, {
         theme: "filled_black",
@@ -130,7 +155,13 @@ export default function GoogleSignInButton({ mode, onSuccess, onError }: GoogleS
     } catch {
       setRenderedGsi(false);
     }
-  }, [clientId, scriptReady, mode, auth, onSuccess, onError]);
+
+    return () => {
+      if (activeGoogleCredentialHandler === credentialHandler) {
+        activeGoogleCredentialHandler = null;
+      }
+    };
+  }, [clientId, scriptReady]);
 
   const handleFallbackClick = () => {
     if (!clientId) {

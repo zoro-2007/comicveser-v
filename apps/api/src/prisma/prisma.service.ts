@@ -152,6 +152,33 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     } catch {
       // Standard migration file is also present in prisma/migrations.
     }
+
+    // Analytics is non-critical to normal browsing, but the event table must exist
+    // before the consent-based /analytics/event endpoint can write to it. Keep this
+    // additive and idempotent so existing Supabase databases are left untouched.
+    try {
+      await this.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "AnalyticsEvent" (
+          "id" TEXT NOT NULL,
+          "type" TEXT NOT NULL,
+          "userId" TEXT,
+          "comicId" TEXT,
+          "chapterId" TEXT,
+          "path" TEXT,
+          "query" TEXT,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "AnalyticsEvent_pkey" PRIMARY KEY ("id")
+        );
+      `);
+      await this.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AnalyticsEvent_createdAt_idx" ON "AnalyticsEvent"("createdAt");`);
+      await this.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AnalyticsEvent_type_createdAt_idx" ON "AnalyticsEvent"("type", "createdAt");`);
+      await this.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AnalyticsEvent_comicId_idx" ON "AnalyticsEvent"("comicId");`);
+    } catch (error) {
+      console.warn(
+        "[database] Could not ensure AnalyticsEvent table. Apply the analytics migration in Supabase:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   async onModuleDestroy() {
