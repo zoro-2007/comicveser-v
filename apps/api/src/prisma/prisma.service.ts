@@ -7,7 +7,6 @@ export type SourceRoleValue = "PRIMARY" | "CHAPTER_FALLBACK";
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     await this.$connect();
-    if (process.env.VERCEL === "1" || process.env.SKIP_RUNTIME_SCHEMA_PATCH === "true") return;
     try {
       await this.$executeRawUnsafe(`
         DO $$ BEGIN
