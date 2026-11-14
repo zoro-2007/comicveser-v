@@ -191,8 +191,8 @@ export default async function ExternalRead({
     }, MAX_CHAPTER_PAGES);
   } catch {
     // The current chapter can still be read without navigation data.
-    chapterItems = [];
-  }
+    chapterItems = [
+
 
   const navigation = buildNav(chapterItems.map((item) => ({
     id: item.id,
@@ -341,7 +341,6 @@ export default async function ExternalRead({
     />
   );
 }
-];
-}
+
 
 export const dynamic = "force-dynamic";
