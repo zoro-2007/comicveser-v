@@ -21,10 +21,6 @@ const MAX_BULK_SELECTION = 10;
 const states = ["APPROVED", "REJECTED", "UNPUBLISHED"] as const;
 const statusLabel = (state: ReviewState) => (state ? cap(state.toLowerCase()) : "Needs review");
 
-/**
- * Asura Provider Catalogue Browser (#provCatView / #provPanel in Figma HTML):
- * Uses .a-panel, .prov-form, "Show All Titles" .pillbtn, and .prov-results / .prov-result cards.
- */
 export default function SourceCatalog({
   sourceId,
   sourceName,
@@ -98,9 +94,14 @@ export default function SourceCatalog({
       ),
     [result, statusFilter],
   );
-  const actionableVisible = visible.filter((item) => item.reviewState !== "APPROVED");
+  const actionableVisible = visible.filter(
+    (item) => item.reviewState !== "APPROVED" && !item.existingComic,
+  );
   const selectedItems = visible.filter(
-    (item) => selectedIds.includes(item.externalId) && item.reviewState !== "APPROVED",
+    (item) =>
+      selectedIds.includes(item.externalId) &&
+      item.reviewState !== "APPROVED" &&
+      !item.existingComic,
   );
   const allVisibleSelected =
     actionableVisible.length > 0 &&
@@ -158,7 +159,7 @@ export default function SourceCatalog({
     const base = `/admin/sources/catalog/${encodeURIComponent(sourceId)}/${encodeURIComponent(
       item.externalId,
     )}`;
-    if (item.reviewState === "APPROVED") return "already published";
+    if (item.reviewState === "APPROVED" || item.existingComic) return "already published";
 
     if (item.reviewState === "UNPUBLISHED") {
       await act(`${base}/republish`, "POST");
@@ -174,6 +175,8 @@ export default function SourceCatalog({
     updateCatalogItem(item.externalId, {
       reviewState: "APPROVED",
       comicSlug: published?.slug ?? item.comicSlug,
+      alreadyPublishedFrom: sourceName,
+      alreadyPublishedMessage: `Already published on ComicVerse from: ${sourceName}`,
     });
     return `published${
       typeof published?.importedChapters === "number"
@@ -192,6 +195,36 @@ export default function SourceCatalog({
     } catch (e) {
       setActionErrors([
         `${item.title}: ${e instanceof ApiError ? e.message : "The publish action failed."}`,
+      ]);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function linkAsFallback(item: CatalogItem) {
+    if (!item.existingComic) return;
+    setBusyId(item.externalId);
+    setNotice("");
+    setActionErrors([]);
+    try {
+      await act(`/admin/sources/comics/${encodeURIComponent(item.existingComic.id)}/fallbacks`, "POST", {
+        sourceId,
+        externalId: item.externalId,
+      });
+      updateCatalogItem(item.externalId, {
+        reviewState: "APPROVED",
+        existingComic: {
+          ...item.existingComic,
+          alreadyLinked: true,
+          canLinkFallback: false,
+        },
+      });
+      setNotice(
+        `${item.title}: Linked ${sourceName} as a fallback source for ${item.existingComic.title}.`,
+      );
+    } catch (e) {
+      setActionErrors([
+        `${item.title}: ${e instanceof ApiError ? e.message : "Could not link fallback source."}`,
       ]);
     } finally {
       setBusyId("");
@@ -473,7 +506,11 @@ export default function SourceCatalog({
               {visible.map((item) => {
                 const isSelected = selectedIds.includes(item.externalId);
                 const isBusy = busyId === item.externalId;
-                const isAlreadyPublished = item.reviewState === "APPROVED";
+                const crossMatch = item.existingComic ?? null;
+                const isConfirmedCrossProviderMatch = !!crossMatch && crossMatch.sourceId !== sourceId;
+                const isAlreadyPublished = item.reviewState === "APPROVED" || isConfirmedCrossProviderMatch;
+                const targetComicSlug = item.comicSlug ?? crossMatch?.slug ?? null;
+
                 return (
                   <article key={item.externalId} className="prov-result">
                     <Cover
@@ -497,12 +534,41 @@ export default function SourceCatalog({
                           className="h-3.5 w-3.5 accent-current"
                         />
                         <span className="pt truncate">{item.title}</span>
-                        <Badge v={item.reviewState ?? "PENDING"} />
+                        <Badge v={isConfirmedCrossProviderMatch ? "APPROVED" : item.reviewState ?? "PENDING"} />
                       </div>
                       <span className="pm2">
                         {cap(item.contentType)}
                         {item.status ? ` · ${cap(item.status)}` : ""} · via {sourceName}
                       </span>
+
+                      {item.alreadyPublishedMessage && (
+                        <p
+                          style={{
+                            fontSize: 11.5,
+                            color: "#6ee7b7",
+                            fontWeight: 600,
+                            margin: "4px 0 0",
+                          }}
+                        >
+                          {item.alreadyPublishedMessage}
+                        </p>
+                      )}
+
+                      {!item.alreadyPublishedMessage &&
+                        item.ambiguousMatches &&
+                        item.ambiguousMatches.length > 0 && (
+                          <p style={{ fontSize: 11, color: "#fbbf24", margin: "4px 0 0" }}>
+                            Similar title on ComicVerse:{" "}
+                            <Link
+                              href={`/comics/${item.ambiguousMatches[0].comicSlug}`}
+                              className="underline"
+                            >
+                              {item.ambiguousMatches[0].comicTitle}
+                            </Link>{" "}
+                            ({item.ambiguousMatches[0].primarySourceName})
+                          </p>
+                        )}
+
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <Link
                           href={`/admin/comics/new/${encodeURIComponent(sourceId)}/${encodeURIComponent(
@@ -512,23 +578,40 @@ export default function SourceCatalog({
                         >
                           Inspect title
                         </Link>
-                        {item.comicSlug && item.reviewState !== "REJECTED" && (
+                        {targetComicSlug && item.reviewState !== "REJECTED" && (
                           <Link
-                            href={`/comics/${item.comicSlug}`}
+                            href={`/comics/${targetComicSlug}`}
                             style={{ fontSize: 11.5, color: "var(--purple-2)", fontWeight: 600 }}
                           >
                             View publication ↗
                           </Link>
                         )}
                       </div>
-                      {item.reviewState && (
+                      {item.reviewState && !item.alreadyPublishedMessage && (
                         <span style={{ fontSize: 11, color: "var(--muted)", display: "block", marginTop: 3 }}>
                           Status: {statusLabel(item.reviewState)}
                         </span>
                       )}
                     </div>
-                    <div>
-                      {isAlreadyPublished ? (
+                    <div className="flex flex-col items-end gap-1.5">
+                      {isConfirmedCrossProviderMatch ? (
+                        <>
+                          <span className="prov-add added">
+                            ✓ {crossMatch.alreadyLinked ? "Linked fallback" : `On ${crossMatch.sourceName}`}
+                          </span>
+                          {crossMatch.canLinkFallback && (
+                            <button
+                              type="button"
+                              disabled={bulkBusy || !!busyId}
+                              onClick={() => linkAsFallback(item)}
+                              className="rowbtn"
+                              style={{ fontSize: 11.5 }}
+                            >
+                              {isBusy ? "Linking…" : "Link as Fallback Source"}
+                            </button>
+                          )}
+                        </>
+                      ) : item.reviewState === "APPROVED" ? (
                         <span className="prov-add added">✓ Added</span>
                       ) : (
                         <button

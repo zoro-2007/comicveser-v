@@ -1,11 +1,36 @@
 import { API } from "./api";
 
 export interface SourceInfo { id: string; displayName: string; officialUrl: string; attribution: string; notes: string[]; capabilities: { search: boolean; details: boolean; chapters: boolean; pages: boolean; types: string[]; languages: string[] | null } }
+
+export interface ExistingComicMatch {
+  id: string;
+  slug: string;
+  title: string;
+  sourceId: string;
+  sourceName: string;
+  matchedOn: "title" | "altTitle";
+  alreadyLinked: boolean;
+  canLinkFallback: boolean;
+}
+
+export interface AmbiguousComicMatch {
+  comicId: string;
+  comicSlug: string;
+  comicTitle: string;
+  primarySourceId: string;
+  primarySourceName: string;
+}
+
 export interface Manga {
   id: string; externalId: string; sourceId: string; title: string; alternativeTitles: string[];
   coverUrl: string | null; description: string | null; status: string | null; genres: string[];
   contentType: string; language: string | null; sourceUrl: string;
+  rating?: number | null;
   authors?: string[]; artists?: string[]; year?: number | null; availableLanguages?: string[];
+  existingComic?: ExistingComicMatch | null;
+  alreadyPublishedFrom?: string | null;
+  alreadyPublishedMessage?: string | null;
+  ambiguousMatches?: AmbiguousComicMatch[];
 }
 export interface MangaDetails extends Manga {
   authors: string[];

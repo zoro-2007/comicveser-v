@@ -20,7 +20,7 @@ services:
       - key: SOURCE_SYNC_ENABLED
         value: "true"
       - key: SOURCE_SYNC_INTERVAL_MINUTES
-        value: "30"
+        value: "10"
       - key: SOURCE_SYNC_BATCH_SIZE
         value: "20"
       - key: SOURCES_TIMEOUT_MS

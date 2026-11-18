@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { Comic } from "@/lib/comics";
+import { Comic, formatRating } from "@/lib/comics";
 import { ComicVerseMark } from "./ComicVerseLogo";
 import { useLibrary } from "./LibraryProvider";
 
@@ -52,7 +52,9 @@ export function Cover({
           loading={priority ? "eager" : "lazy"}
           decoding="async"
           referrerPolicy="no-referrer"
-          className="absolute inset-0 z-20 h-full w-full object-cover"
+          draggable={false}
+          onContextMenu={(e) => e.preventDefault()}
+          className="absolute inset-0 z-20 h-full w-full select-none object-cover"
         />
       )}
     </div>
@@ -97,19 +99,11 @@ export function BookmarkToggle({ comicId, className = "" }: { comicId: string; c
   );
 }
 
-/**
- * Unified Asura Comic Card (.ucard):
- * Used identically on Home (Trending), Browse, Manga, and Detail recommendations, desktop + mobile:
- * 1. Cover + top-right ★ rating badge (.rate-badge)
- * 2. Title (h3)
- * 3. Meta pills row (.cmeta): Chapters count pill (.chpill) + Status pill (.stpill)
- * 4. Full-width Bookmark / Bookmarked toggle button (.bm-toggle)
- */
 export default function ComicCard({ comic, priority = false }: { comic: Comic; priority?: boolean }) {
   const lib = useLibrary();
   const progress = lib.progressFor(comic.id);
   const count = comic.chapterCount || comic.chapters.length;
-  const ratingText = comic.rating && comic.rating > 0 ? comic.rating.toFixed(1) : "9.5";
+  const ratingText = formatRating(comic);
   const statusLabel = comic.status || "Ongoing";
 
   return (

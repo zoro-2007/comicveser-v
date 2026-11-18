@@ -1,8 +1,9 @@
 import Link from "next/link";
-import ComicCard, { Cover } from "@/components/ComicCard";
+import { Cover } from "@/components/ComicCard";
 import FeaturedCarousel from "@/components/FeaturedCarousel";
 import PopularTabs from "@/components/PopularTabs";
 import LatestUpdates from "@/components/LatestUpdates";
+import TrendingComicsLive from "@/components/TrendingComicsLive";
 import EmptyState from "@/components/EmptyState";
 import { ComicVerseMark } from "@/components/ComicVerseLogo";
 import { allComics, getAnnouncements, popularComics } from "@/lib/comics";
@@ -39,10 +40,21 @@ export default async function Home() {
   ]);
 
   const activeComics: Comic[] = comics;
-  const byViews = [...activeComics].sort((a, b) => b.views - a.views);
+  const byViews = [...activeComics].sort(
+    (a, b) =>
+      (b.views ?? 0) - (a.views ?? 0) ||
+      (b.rating ?? 0) - (a.rating ?? 0) ||
+      b.updatedAt.localeCompare(a.updatedAt),
+  );
   const featured = byViews.slice(0, 9);
+  const latestPubTime = (c: Comic) => {
+    const chIso = c.latest?.publishedAt || c.chapters[c.chapters.length - 1]?.publishedAt;
+    const chMs = chIso ? new Date(chIso).getTime() : 0;
+    const updMs = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
+    return Number.isFinite(chMs) && chMs > 0 ? chMs : Number.isFinite(updMs) ? updMs : 0;
+  };
   const latest = [...activeComics]
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .sort((a, b) => latestPubTime(b) - latestPubTime(a))
     .slice(0, 12);
   const trending = byViews.slice(0, 10);
   const editorPick = byViews[0] ?? activeComics[0] ?? null;
@@ -88,19 +100,11 @@ export default async function Home() {
                   ★
                 </span>
                 <h2>Trending Comics</h2>
-                <Link href="/browse" className="pillbtn">
+                <Link href="/browse?sort=popular" className="pillbtn">
                   All Comics
                 </Link>
               </div>
-              {trending.length ? (
-                <div className="trend-row" id="trendRow">
-                  {trending.slice(0, 5).map((c, i) => (
-                    <ComicCard key={c.slug} comic={c} priority={i < 5} />
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="Nothing trending yet" />
-              )}
+              <TrendingComicsLive initial={trending} />
             </section>
 
             <section className="panel" data-layer="Latest Updates">

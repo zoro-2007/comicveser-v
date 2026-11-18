@@ -3,7 +3,7 @@ export interface SourcesConfig { enabled: boolean; timeoutMs: number; userAgent:
 const BROWSER_LIKE = /mozilla|chrome|safari|firefox|edge|opera/i;
 
 /**
- * Reads and validates the external-source settings. Off by default.
+ * Reads and validates the external-source settings. Off by default when called with an empty object in unit tests.
  * When on, bad settings stop the API at start-up with a clear message instead of failing on a user request.
  */
 export function loadSourcesConfig(env: Record<string, string | undefined> = process.env): SourcesConfig {
@@ -34,10 +34,10 @@ export interface SourceSyncConfig {
 export function loadSourceSyncConfig(env: Record<string, string | undefined> = process.env): SourceSyncConfig {
   const rawEnabled = (env.SOURCE_SYNC_ENABLED ?? "true").trim().toLowerCase();
   const enabled = rawEnabled !== "false" && rawEnabled !== "0" && env.DISABLE_JOBS !== "true";
-  const parsedInterval = Number.parseInt((env.SOURCE_SYNC_INTERVAL_MINUTES ?? "30").trim(), 10);
-  const intervalMinutes = Number.isFinite(parsedInterval) && parsedInterval >= 1 ? Math.min(parsedInterval, 1440) : 30;
-  const parsedBatch = Number.parseInt((env.SOURCE_SYNC_BATCH_SIZE ?? "20").trim(), 10);
-  const batchSize = Number.isFinite(parsedBatch) && parsedBatch >= 1 ? Math.min(parsedBatch, 200) : 20;
+  const parsedInterval = Number.parseInt((env.SOURCE_SYNC_INTERVAL_MINUTES ?? "10").trim(), 10);
+  const intervalMinutes = Number.isFinite(parsedInterval) && parsedInterval >= 1 ? Math.min(parsedInterval, 1440) : 10;
+  const parsedBatch = Number.parseInt((env.SOURCE_SYNC_BATCH_SIZE ?? "100").trim(), 10);
+  const batchSize = Number.isFinite(parsedBatch) && parsedBatch >= 1 ? Math.min(parsedBatch, 500) : 100;
   return {
     enabled,
     intervalMinutes,

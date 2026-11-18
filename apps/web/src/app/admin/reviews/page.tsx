@@ -1,9 +1,11 @@
 "use client";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
 const CATEGORIES = [
   "ALL",
+  "COMIC_REQUEST",
   "BROKEN_CHAPTER",
   "CONTENT_ISSUE",
   "BUG",
@@ -190,7 +192,7 @@ export default function AdminReviews() {
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
                         {!r.isRead && <span className="tag purple">UNREAD</span>}
-                        <span className="tag grey">{r.category ?? "GENERAL"}</span>
+                        <span className={`tag ${r.category === "COMIC_REQUEST" || String(r.subject || "").startsWith("Comic Request:") ? "purple" : "grey"}`}>{String(r.subject || "").startsWith("Comic Request:") ? "COMIC_REQUEST" : (r.category ?? "GENERAL")}</span>
                         <strong className="text-white">{r.subject || "Issue Report"}</strong>
                         <span
                           className={`tag ${
@@ -214,6 +216,15 @@ export default function AdminReviews() {
                     </div>
 
                     <div className="flex flex-wrap gap-2 text-xs">
+                      {(r.category === "COMIC_REQUEST" || String(r.subject || "").startsWith("Comic Request:")) && (
+                        <Link
+                          href="/admin/comics/new"
+                          className="rowbtn"
+                          style={{ borderColor: "rgba(168,85,247,.55)", color: "#d8b4fe" }}
+                        >
+                          Search &amp; Publish in Catalog ↗
+                        </Link>
+                      )}
                       {r.status !== "RESOLVED" && (
                         <button
                           type="button"

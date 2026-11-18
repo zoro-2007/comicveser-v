@@ -1,6 +1,6 @@
 import { SourceError } from "./provider.interface";
 import type { ChapterPages, ChaptersResponse, HealthResult, MangaDetails, MangaSourceProvider, SearchQuery, SearchResponse, SourceInfo } from "./provider.interface";
-import { normalizeChapters, normalizeDetails, normalizePages, normalizeSearch } from "./asurascans.normalize";
+import { canonicalAsuraSlug, extractAsuraHtmlMetadata, normalizeChapters, normalizeDetails, normalizePages, normalizeSearch } from "./asurascans.normalize";
 import type { SourcesConfig } from "./sources.config";
 
 const SITE = "https://asurascans.com";
@@ -110,7 +110,8 @@ export class AsuraScansProvider implements MangaSourceProvider {
 
   async details(externalId: string): Promise<MangaDetails> {
     if (!/^[a-z0-9-]{2,100}$/i.test(externalId)) throw new SourceError("INVALID_REQUEST", "That title id is not valid.");
-    const url = this.seriesSearchUrl(externalId.replace(/-[a-f0-9]{8}$/i, ""), 20, 0);
+    const baseSlug = canonicalAsuraSlug(externalId);
+    const url = this.seriesSearchUrl(baseSlug, 20, 0);
     const raw = await this.json(url);
     const rows = raw && typeof raw === "object" && Array.isArray((raw as { data?: unknown }).data)
       ? (raw as { data: unknown[] }).data
@@ -118,12 +119,26 @@ export class AsuraScansProvider implements MangaSourceProvider {
     if (!raw || typeof raw !== "object" || !Array.isArray((raw as { data?: unknown }).data)) {
       throw new SourceError("BAD_RESPONSE", "Asura Scans sent a response we could not read.");
     }
-    const item = rows.find((row) => {
-      const publicUrl = row && typeof row === "object" ? (row as { public_url?: unknown }).public_url : null;
-      return typeof publicUrl === "string" && publicUrl.split("/").filter(Boolean).at(-1) === externalId;
-    });
+    const item =
+      rows.find((row) => {
+        const publicUrl = row && typeof row === "object" ? (row as { public_url?: unknown }).public_url : null;
+        return typeof publicUrl === "string" && publicUrl.split("/").filter(Boolean).at(-1) === externalId;
+      }) ??
+      rows.find((row) => {
+        const publicUrl = row && typeof row === "object" ? (row as { public_url?: unknown }).public_url : null;
+        const candidateId = typeof publicUrl === "string" ? publicUrl.split("/").filter(Boolean).at(-1) : null;
+        const rowSlug = row && typeof row === "object" && typeof (row as { slug?: unknown }).slug === "string" ? (row as { slug: string }).slug : null;
+        return (candidateId && canonicalAsuraSlug(candidateId) === baseSlug) || (rowSlug && canonicalAsuraSlug(rowSlug) === baseSlug);
+      });
     if (!item) throw new SourceError("NOT_FOUND", "That title was not found on Asura Scans.");
-    return normalizeDetails(item);
+    const normalized = normalizeDetails(item);
+    const cachedHtml = this.chapterCache.get(externalId)?.html ?? this.chapterCache.get(normalized.externalId)?.html;
+    if (cachedHtml && (normalized.genres.length === 0 || normalized.rating == null)) {
+      const htmlMeta = extractAsuraHtmlMetadata(cachedHtml);
+      if (normalized.genres.length === 0 && htmlMeta.genres.length > 0) normalized.genres = htmlMeta.genres;
+      if (normalized.rating == null && htmlMeta.rating != null) normalized.rating = htmlMeta.rating;
+    }
+    return normalized;
   }
 
   private async chapterHtml(mangaId: string): Promise<string> {

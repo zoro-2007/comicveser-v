@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from
 import { ApiTags } from "@nestjs/swagger";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
 import { ComicsService } from "./comics.service";
-import { CreateComicDto, ListComicsQuery, UpdateComicDto } from "./dto/comic.dto";
+import { CreateComicDto, ListComicsQuery, UpdateComicDto, UpdateComicRatingDto } from "./dto/comic.dto";
 import { IsInt, IsString, Max, Min } from "class-validator";
 class ComicCoverUploadDto { @IsString() contentType: string; @IsInt() @Min(1) @Max(10 * 1024 * 1024) size: number; }
 
@@ -27,6 +27,11 @@ export class ComicsController {
 
   @RequirePermission("comic:write")
   @Post("admin/comics") create(@CurrentUser() u: AuthUser, @Body() dto: CreateComicDto) { return this.svc.create(dto, u.id); }
+
+  @RequirePermission("comic:write")
+  @Put("admin/comics/:id/rating") updateRating(@CurrentUser() u: AuthUser, @Param("id") id: string, @Body() dto: UpdateComicRatingDto) {
+    return this.svc.updateRating(id, dto, u.id);
+  }
 
   @RequirePermission("comic:write")
   @Put("admin/comics/:id") update(@CurrentUser() u: AuthUser, @Param("id") id: string, @Body() dto: UpdateComicDto) { return this.svc.update(id, dto, u.id); }

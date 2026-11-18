@@ -1,15 +1,9 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { Comic, chapterLabel, latestChapter } from "@/lib/comics";
+import { Comic, chapterLabel, formatRating, latestChapter } from "@/lib/comics";
 import { Cover } from "./ComicCard";
 
-/**
- * Asura Home Hero Section:
- * 1. Red Announcement Strip (.s-strip) with megaphone icon, announcement message, READ CTA, and dismiss X button.
- * 2. Hero Cover Rail (.hero-rail) with radial purple glow, 7–9 horizontal covers (.rc) where the center cover (.rc.center)
- *    is enlarged with ★ rating badge and bottom title gradient, plus pagination dots (.rail-nav).
- */
 export default function FeaturedCarousel({
   comics,
   announcement,
@@ -83,8 +77,8 @@ export default function FeaturedCarousel({
           {items.map((c, i) => {
             const isCenter = i === railIdx;
             const d = Math.abs(i - railIdx);
-            const ratingText = c.rating && c.rating > 0 ? c.rating.toFixed(1) : "9.6";
-            const cls = `rc${isCenter ? " center" : ""}${d > 1 ? " hide-m" : ""}`;
+            const ratingText = formatRating(c);
+            const cls = `rc${isCenter ? " center scale-100" : " scale-95"}${d > 1 ? " hide-m" : ""}`;
 
             if (isCenter) {
               return (

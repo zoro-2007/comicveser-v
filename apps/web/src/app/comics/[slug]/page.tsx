@@ -8,7 +8,7 @@ import Track from "@/components/Track";
 import ReviewsSection from "@/components/ReviewsSection";
 import BookmarkButton from "@/components/BookmarkButton";
 import ChapterList from "@/components/ChapterList";
-import { allComics, chapterLabel, getComic, latestChapter, timeAgo } from "@/lib/comics";
+import { allComics, chapterLabel, formatRating, getComic, latestChapter, slugifyGenre, timeAgo } from "@/lib/comics";
 
 type Props = { params: { slug: string } };
 
@@ -29,7 +29,7 @@ export default async function ComicPage({ params }: Props) {
 
   const last = latestChapter(c);
   const creators = [...new Set([c.author, c.artist].filter(Boolean))].join(" · ");
-  const ratingText = c.rating > 0 ? c.rating.toFixed(1) : "9.5";
+  const ratingText = formatRating(c);
   const alsoLike = catalogue.filter((x) => x.id !== c.id).slice(0, 5);
 
   return (
@@ -67,9 +67,14 @@ export default async function ComicPage({ params }: Props) {
             )}
 
             <div className="meta-line">
-              <span>
+              <span title={c.userRating ? "ComicVerse user rating" : c.providerRating ? "Provider rating" : "No rating yet"}>
                 ★ <b>{ratingText}</b>
               </span>
+              {c.userRating && c.providerRating && (
+                <span>
+                  Provider <b>★ {c.providerRating.toFixed(1)}</b>
+                </span>
+              )}
               <span>
                 Status <b>{c.status}</b>
               </span>
@@ -86,13 +91,19 @@ export default async function ComicPage({ params }: Props) {
               </span>
             </div>
 
-            <div className="genre-chips">
-              {c.genres.map((g) => (
-                <Link key={g} href={`/browse?genre=${encodeURIComponent(g)}`} className="chip">
-                  {g}
-                </Link>
-              ))}
-            </div>
+            {c.genres.length > 0 && (
+              <div className="genre-chips" aria-label="Comic genres">
+                {c.genres.map((g) => (
+                  <Link
+                    key={g}
+                    href={`/browse?genre=${encodeURIComponent(slugifyGenre(g))}`}
+                    className="chip detail-genre-chip"
+                  >
+                    {g}
+                  </Link>
+                ))}
+              </div>
+            )}
 
             <p className="synop">{c.description}</p>
 

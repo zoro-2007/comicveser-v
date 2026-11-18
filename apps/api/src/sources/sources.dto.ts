@@ -20,12 +20,12 @@ export class ComicChaptersQuery extends ChaptersQuery {
 }
 export class FallbackCandidatesQuery {
   @IsOptional() @IsString() @Length(0, 150) q?: string;
-  @IsOptional() @IsIn(["weebcentral", "asurascans"]) sourceId?: "weebcentral" | "asurascans";
+  @IsOptional() @IsIn(["weebcentral", "asurascans", "comick"]) sourceId?: "weebcentral" | "asurascans" | "comick";
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) page: number = 1;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(24) limit: number = 12;
 }
 export class LinkFallbackDto {
-  @IsIn(["weebcentral", "asurascans"]) sourceId: "weebcentral" | "asurascans";
+  @IsIn(["weebcentral", "asurascans", "comick"]) sourceId: "weebcentral" | "asurascans" | "comick";
   @IsString() @Length(1, 150) externalId: string;
 }
 export class ImportChaptersBodyDto {

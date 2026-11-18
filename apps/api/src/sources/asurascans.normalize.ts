@@ -11,6 +11,18 @@ const obj = (value: unknown): Obj => value && typeof value === "object" ? value 
 const str = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : null;
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
+/**
+ * Strips Asura Scans' rotating 8-character hex suffix (e.g. "nano-machine-7f3a9b12" -> "nano-machine")
+ * so canonical title identity remains stable across catalogue refreshes and server restarts.
+ */
+export function canonicalAsuraSlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/-[a-f0-9]{8}$/i, "")
+    .replace(/^\/+|\/+$/g, "");
+}
+
 export function contentType(value: unknown): ContentType {
   const type = typeof value === "string" ? value.toLowerCase() : "";
   return ["manga", "manhwa", "manhua", "webtoon", "novel"].includes(type) ? type as ContentType : "unknown";
@@ -21,16 +33,122 @@ function externalId(row: Obj): string | null {
   if (publicUrl) {
     try {
       const path = new URL(publicUrl, SITE).pathname.split("/").filter(Boolean);
-      if (path[0] === "comics" && path[1] && /^[a-z0-9-]+$/i.test(path[1])) return path[1];
+      if ((path[0] === "comics" || path[0] === "series") && path[1] && /^[a-z0-9-]+$/i.test(path[1])) return path[1];
     } catch { /* use the source's slug below */ }
   }
   return str(row.slug);
 }
 
+function normalizeGenreName(raw: string): string | null {
+  const cleaned = htmlText(raw).replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > 50 || /^\d+$/.test(cleaned)) return null;
+  if (/^(?:all|genres?|tags?|categories|none|n\/a|unknown)$/i.test(cleaned)) return null;
+  return cleaned;
+}
+
+export function extractAsuraGenres(row: Obj): string[] {
+  const candidates: unknown[] = [
+    ...list(row.genres),
+    ...list(row.tags),
+    ...list(row.categories),
+  ];
+  if (typeof row.genres === "string") candidates.push(...row.genres.split(","));
+  if (typeof row.genre === "string") candidates.push(...row.genre.split(","));
+  if (Array.isArray(row.genre)) candidates.push(...row.genre);
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of candidates) {
+    const rawName =
+      typeof entry === "string"
+        ? entry
+        : str(obj(entry).name) ?? str(obj(entry).title) ?? str(obj(entry).label) ?? str(obj(entry).slug);
+    if (!rawName) continue;
+    for (const part of rawName.split(",")) {
+      const normalized = normalizeGenreName(part);
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+export function extractAsuraRating(row: Obj): number | null {
+  const candidates: unknown[] = [
+    row.rating,
+    row.average_rating,
+    row.avg_rating,
+    row.score,
+    row.stars,
+    obj(row.rating).average,
+    obj(row.rating).value,
+    obj(row.rating).score,
+    obj(row.ratings).average,
+    obj(row.ratings).value,
+  ];
+  for (const candidate of candidates) {
+    const parsed =
+      typeof candidate === "number"
+        ? candidate
+        : typeof candidate === "string" && candidate.trim()
+        ? Number.parseFloat(candidate.trim())
+        : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed <= 0) continue;
+    if (parsed <= 10) return Number(parsed.toFixed(2));
+    if (parsed <= 100) return Number((parsed / 10).toFixed(2));
+  }
+  return null;
+}
+
+export function extractAsuraHtmlMetadata(html: string): { genres: string[]; rating: number | null } {
+  const seen = new Set<string>();
+  const genres: string[] = [];
+  const addGenre = (val: string | null) => {
+    if (!val) return;
+    const g = normalizeGenreName(val);
+    if (!g) return;
+    const key = g.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    genres.push(g);
+  };
+
+  for (const anchor of elements(html, "a")) {
+    const href = anchor.attrs.href ?? "";
+    if (/[?&]genres?=/i.test(href) || /\/(?:genres?|tags?)\//i.test(href)) {
+      addGenre(anchor.innerHtml);
+    }
+  }
+
+  const normalizedHtml = html.replace(/\\"/g, '"');
+  for (const m of normalizedHtml.matchAll(/"genres"\s*:\s*\[([^\]]+)\]/gi)) {
+    const block = m[1] ?? "";
+    for (const nm of block.matchAll(/"name"\s*:\s*"([^"]+)"/gi)) {
+      addGenre(nm[1]);
+    }
+  }
+
+  let rating: number | null = null;
+  const ratingMatch =
+    normalizedHtml.match(/"(?:rating|average_rating|avg_rating|score)"\s*:\s*"?(\d+(?:\.\d+)?)"?/i) ??
+    html.match(/itemprop=["']ratingValue["'][^>]*>\s*(\d+(?:\.\d+)?)\s*</i);
+  if (ratingMatch?.[1]) {
+    const parsed = Number.parseFloat(ratingMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 10) {
+      rating = Number(parsed.toFixed(2));
+    }
+  }
+
+  return { genres, rating };
+}
+
 export function normalizeSummary(raw: unknown): MangaSummary | null {
   const row = obj(raw);
   const id = externalId(row);
-  const title = str(row.title);
+  const title = str(row.title) ?? str(row.name);
   if (!id || !title) return null;
   const publicUrl = str(row.public_url) ?? `/comics/${id}`;
   let sourceUrl: string;
@@ -40,12 +158,34 @@ export function normalizeSummary(raw: unknown): MangaSummary | null {
     sourceUrl = url.toString();
   } catch { return null; }
   const description = str(row.description);
+  const altTitlesRaw = [
+    ...list(row.alt_titles),
+    ...list(row.alternative_titles),
+    ...(typeof row.alt_title === "string" ? row.alt_title.split(/[|/,;]+/) : []),
+  ];
+  const alternativeTitles = [
+    ...new Set(
+      altTitlesRaw
+        .filter((value): value is string => typeof value === "string" && !!value.trim())
+        .map((v) => v.trim())
+        .filter((v) => v.toLowerCase() !== title.toLowerCase()),
+    ),
+  ];
+  const rating = extractAsuraRating(row);
   return {
-    id, externalId: id, sourceId: "asurascans", title,
-    alternativeTitles: list(row.alt_titles).filter((value): value is string => typeof value === "string" && !!value.trim()),
-    coverUrl: str(row.cover) ?? str(row.cover_url), description: description ? htmlText(description) : null,
-    status: str(row.status), genres: list(row.genres).map((genre) => str(obj(genre).name)).filter((name): name is string => !!name),
-    contentType: contentType(row.type), language: "en", sourceUrl,
+    id,
+    externalId: id,
+    sourceId: "asurascans",
+    title,
+    alternativeTitles,
+    coverUrl: str(row.cover) ?? str(row.cover_url) ?? str(row.thumb),
+    description: description ? htmlText(description) : null,
+    status: str(row.status),
+    genres: extractAsuraGenres(row),
+    contentType: contentType(row.type),
+    language: "en",
+    sourceUrl,
+    rating,
   };
 }
 
@@ -68,9 +208,23 @@ export function normalizeDetails(raw: unknown): MangaDetails {
   const summary = normalizeSummary(raw);
   if (!summary) throw new SourceError("BAD_RESPONSE", "Asura Scans returned a title we could not read.");
   const row = obj(raw);
-  const authors = [str(row.author)].filter((value): value is string => !!value);
-  const artists = [str(row.artist)].filter((value): value is string => !!value);
-  return { ...summary, authors, artists, year: null, availableLanguages: ["en"] };
+  const authors = [
+    str(row.author),
+    ...list(row.authors).map((a) => (typeof a === "string" ? str(a) : str(obj(a).name))),
+  ].filter((value): value is string => !!value);
+  const artists = [
+    str(row.artist),
+    ...list(row.artists).map((a) => (typeof a === "string" ? str(a) : str(obj(a).name))),
+  ].filter((value): value is string => !!value);
+  const rawYear = typeof row.year === "number" ? row.year : typeof row.released === "string" ? Number.parseInt(row.released, 10) : null;
+  const year = rawYear && Number.isInteger(rawYear) && rawYear >= 1900 && rawYear <= 2100 ? rawYear : null;
+  return {
+    ...summary,
+    authors: [...new Set(authors)],
+    artists: [...new Set(artists)],
+    year,
+    availableLanguages: ["en"],
+  };
 }
 
 function chapterNumber(value: string): number | null {
@@ -176,6 +330,7 @@ export function parseAsuraScansChapterMarkup(
 
 function getChapterRows(html: string, mangaId: string): ChapterItem[] {
   const expectedPrefix = `/comics/${mangaId}/chapter/`;
+  const baseSlug = canonicalAsuraSlug(mangaId);
   const rows = new Map<string, ChapterItem>();
   const structuredDates = extractStructuredChapterDates(html);
   const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
@@ -189,8 +344,17 @@ function getChapterRows(html: string, mangaId: string): ChapterItem[] {
     if (!href) continue;
     let url: URL;
     try { url = new URL(href, SITE); } catch { continue; }
-    if (url.protocol !== "https:" || url.hostname !== "asurascans.com" || !url.pathname.startsWith(expectedPrefix)) continue;
-    const id = url.pathname.slice(expectedPrefix.length).split("/")[0];
+    if (url.protocol !== "https:" || url.hostname !== "asurascans.com") continue;
+
+    let id: string | undefined;
+    if (url.pathname.startsWith(expectedPrefix)) {
+      id = url.pathname.slice(expectedPrefix.length).split("/")[0];
+    } else if (baseSlug) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts[0] === "comics" && parts[2] === "chapter" && canonicalAsuraSlug(parts[1] ?? "") === baseSlug) {
+        id = parts[3];
+      }
+    }
     if (!id || !/^[a-z0-9.-]+$/i.test(id)) continue;
 
     const endIdx = (fullMatch.index ?? 0) + fullMatch[0].length;

@@ -84,8 +84,34 @@ export default function SourceTitleReview({ sourceId, sourceName, externalId, en
     }
   }
 
+  async function linkAsFallback() {
+    if (!details?.existingComic) return;
+    setBusy("link-fallback");
+    setNotice("");
+    setActionError("");
+    try {
+      await act(`/admin/sources/comics/${encodeURIComponent(details.existingComic.id)}/fallbacks`, "POST", {
+        sourceId,
+        externalId,
+      });
+      setNotice(`Linked ${sourceName} as a fallback source for ${details.existingComic.title}.`);
+      const updated = await api<Details>(`/admin/sources/catalog/${sourceId}/${encodeURIComponent(externalId)}`, {
+        credentials: "include",
+        cache: "no-store",
+      }).catch(() => null);
+      if (updated) setDetails(updated);
+    } catch (error) {
+      setActionError(error instanceof ApiError ? error.message : "Could not link fallback source.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   const currentState = details?.review?.state ?? null;
-  const approvedComicId = details?.review?.comic?.id ?? null;
+  const crossMatch = details?.existingComic ?? null;
+  const isConfirmedCrossProviderMatch = !!crossMatch && crossMatch.sourceId !== sourceId;
+  const approvedComicId = details?.review?.comic?.id ?? crossMatch?.id ?? null;
+  const targetComicSlug = details?.review?.comic?.slug ?? crossMatch?.slug ?? null;
   const actionLabel = (name: string, idle: string, working: string) => busy === name ? working : idle;
   const languageOptions = Array.from(new Set(["en", ...(details?.availableLanguages ?? [])]));
 
@@ -107,15 +133,56 @@ export default function SourceTitleReview({ sourceId, sourceName, externalId, en
         <section className="grid gap-5 rounded-xl border border-line bg-card p-5 sm:grid-cols-[150px_minmax(0,1fr)]">
           <Cover hue={hueOf(details.externalId)} title={details.title} src={media(details.coverUrl)} className="aspect-[2/3] w-36 rounded-lg" />
           <div className="min-w-0">
-            <div className="flex flex-wrap items-start justify-between gap-3"><h2 className="text-2xl font-bold">{details.title}</h2><Badge v={currentState ?? "PENDING"} /></div>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <h2 className="text-2xl font-bold">{details.title}</h2>
+              <Badge v={isConfirmedCrossProviderMatch ? "APPROVED" : currentState ?? "PENDING"} />
+            </div>
             {details.alternativeTitles.length > 0 && <p className="mt-1 text-sm text-muted">{details.alternativeTitles.join(" · ")}</p>}
-            <p className="mt-3 text-sm text-muted">{cap(details.contentType)}{details.status ? ` · ${cap(details.status)}` : ""}{details.year ? ` · ${details.year}` : ""} · {details.language ?? "en"}</p>
+            <p className="mt-3 text-sm text-muted">
+              {cap(details.contentType)}
+              {details.status ? ` · ${cap(details.status)}` : ""}
+              {details.year ? ` · ${details.year}` : ""} · {details.language ?? "en"}
+              {" · "}Rating: {typeof details.rating === "number" && details.rating > 0 ? `★ ${details.rating.toFixed(1)}` : "Not Rated"}
+            </p>
             <p className="mt-2 text-sm">Author: {details.authors.join(", ") || "Unknown"} <span className="text-muted">·</span> Artist: {details.artists.join(", ") || "Unknown"}</p>
             <p className="mt-3 whitespace-pre-line text-sm leading-6 text-muted">{details.description || "No description is available from this provider."}</p>
             {details.genres.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{details.genres.map((genre) => <span key={genre} className="rounded-full border border-line px-2 py-1 text-xs text-muted">{genre}</span>)}</div>}
+
+            {details.alreadyPublishedMessage && (
+              <div className="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+                <p className="font-semibold">{details.alreadyPublishedMessage}</p>
+                {targetComicSlug && (
+                  <p className="mt-1 text-xs">
+                    Existing comic:{" "}
+                    <Link href={`/comics/${targetComicSlug}`} className="font-semibold underline">
+                      /comics/{targetComicSlug} ↗
+                    </Link>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {!details.alreadyPublishedMessage &&
+              details.ambiguousMatches &&
+              details.ambiguousMatches.length > 0 && (
+                <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+                  <p className="font-semibold">Similar existing ComicVerse series detected (not auto-merged):</p>
+                  <ul className="mt-1 list-disc pl-5">
+                    {details.ambiguousMatches.map((m) => (
+                      <li key={m.comicId}>
+                        <Link href={`/comics/${m.comicSlug}`} className="underline">
+                          {m.comicTitle}
+                        </Link>{" "}
+                        (from {m.primarySourceName})
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
             <div className="mt-4 flex flex-wrap gap-3 text-sm">
               <a className="text-primary underline underline-offset-4" href={details.sourceUrl} target="_blank" rel="noopener noreferrer">Open source title ↗</a>
-              {details.review?.comic?.slug && <Link className="text-primary underline underline-offset-4" href={`/comics/${details.review.comic.slug}`} target="_blank">Open ComicVerse publication ↗</Link>}
+              {targetComicSlug && <Link className="text-primary underline underline-offset-4" href={`/comics/${targetComicSlug}`} target="_blank">Open ComicVerse publication ↗</Link>}
               {approvedComicId && <Link className="text-primary underline underline-offset-4" href={`/admin/chapters?comicId=${approvedComicId}`}>Manage chapters in Admin ↗</Link>}
             </div>
             {details.review?.reviewNote && <p className="mt-3 rounded-md border border-line p-3 text-sm text-muted">Review note: {details.review.reviewNote}</p>}
@@ -129,7 +196,9 @@ export default function SourceTitleReview({ sourceId, sourceName, externalId, en
             <div>
               <h2 className="text-lg font-bold">Publication actions</h2>
               <p className="mt-1 text-sm text-muted">
-                {sourceId === "comick"
+                {isConfirmedCrossProviderMatch
+                  ? `${details?.alreadyPublishedMessage}. Duplicate publication is disabled; you can link ${sourceName} as a fallback source for this comic.`
+                  : sourceId === "comick"
                   ? "Approving saves the ComicK metadata and automatically links & imports chapters from WeebCentral or Asura Scans."
                   : "Approval publishes the ComicVerse title and imports its first chapter page."}
               </p>
@@ -137,15 +206,48 @@ export default function SourceTitleReview({ sourceId, sourceName, externalId, en
             {notice && <p role="status" className="mt-4 rounded-md border border-primary/30 p-3 text-sm text-primary">{notice}</p>}
             {actionError && <p role="alert" className="mt-4 rounded-md border border-danger/40 p-3 text-sm text-danger">{actionError}</p>}
             <div className="mt-4 flex flex-wrap gap-2">
-              {(!currentState || currentState === "REJECTED") && <>
-                <button type="button" disabled={!!busy} className={btn} onClick={() => action("approve", "POST", { language })}>
-                  {actionLabel("approve", "Approve & publish", "Publishing…")}
-                </button>
-                <button type="button" disabled={!!busy} className={btnGhost} onClick={() => action("reject", "POST", {})}>{actionLabel("reject", "Reject title", "Rejecting…")}</button>
-              </>}
-              {currentState === "APPROVED" && <button type="button" disabled={!!busy} onClick={() => action("unpublish", "POST")} className={btnGhost}>{actionLabel("unpublish", "Unpublish", "Unpublishing…")}</button>}
-              {currentState === "UNPUBLISHED" && <button type="button" disabled={!!busy} onClick={() => action("republish", "POST")} className={btn}>{actionLabel("republish", "Republish", "Republishing…")}</button>}
-              {sourceId !== "comick" && (currentState === "APPROVED" || currentState === "UNPUBLISHED") && chapters && (chapters.items.length > 0 || chapterPage > 1 || chapters.hasMore) && (
+              {isConfirmedCrossProviderMatch ? (
+                <>
+                  {crossMatch.canLinkFallback ? (
+                    <button type="button" disabled={!!busy} className={btn} onClick={linkAsFallback}>
+                      {busy === "link-fallback" ? "Linking fallback…" : `Link ${sourceName} as Fallback Source`}
+                    </button>
+                  ) : (
+                    <span className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300">
+                      ✓ Linked as fallback source
+                    </span>
+                  )}
+                  {targetComicSlug && (
+                    <Link href={`/comics/${targetComicSlug}`} className={btnGhost}>
+                      View Existing Comic ↗
+                    </Link>
+                  )}
+                </>
+              ) : (
+                <>
+                  {(!currentState || currentState === "REJECTED") && (
+                    <>
+                      <button type="button" disabled={!!busy} className={btn} onClick={() => action("approve", "POST", { language })}>
+                        {actionLabel("approve", "Approve & publish", "Publishing…")}
+                      </button>
+                      <button type="button" disabled={!!busy} className={btnGhost} onClick={() => action("reject", "POST", {})}>
+                        {actionLabel("reject", "Reject title", "Rejecting…")}
+                      </button>
+                    </>
+                  )}
+                  {currentState === "APPROVED" && (
+                    <button type="button" disabled={!!busy} onClick={() => action("unpublish", "POST")} className={btnGhost}>
+                      {actionLabel("unpublish", "Unpublish", "Unpublishing…")}
+                    </button>
+                  )}
+                  {currentState === "UNPUBLISHED" && (
+                    <button type="button" disabled={!!busy} onClick={() => action("republish", "POST")} className={btn}>
+                      {actionLabel("republish", "Republish", "Republishing…")}
+                    </button>
+                  )}
+                </>
+              )}
+              {sourceId !== "comick" && (currentState === "APPROVED" || currentState === "UNPUBLISHED" || crossMatch?.alreadyLinked) && chapters && (chapters.items.length > 0 || chapterPage > 1 || chapters.hasMore) && (
                 <button type="button" disabled={!!busy} onClick={() => action(`chapters/import?page=${chapterPage}&language=${encodeURIComponent(language)}&limit=${CHAPTER_SIZE}`, "POST")}>
                   {busy.startsWith("chapters/import") ? "Importing…" : `Import chapter page ${chapterPage}`}
                 </button>

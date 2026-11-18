@@ -73,8 +73,12 @@ export class UserService {
       const total = totalBy.get(b.comicId) ?? 0;
       const read = readBy.get(b.comicId);
       const hist = histBy.get(b.comicId);
+      const effectiveReadCount = Math.max(
+        read?.count ?? 0,
+        hist ? Math.min(total || Math.ceil(hist.chapter.number), Math.max(0, Math.floor(hist.chapter.number))) : 0,
+      );
       const manual = (b.status as BookmarkStatusValue | null) ?? null;
-      const status = effectiveStatus({ manual, readCount: read?.count ?? 0, hasHistory: !!hist, totalChapters: total, comicCompleted: b.comic.status === "COMPLETED" });
+      const status = effectiveStatus({ manual, readCount: effectiveReadCount, hasHistory: !!hist, totalChapters: total, comicCompleted: b.comic.status === "COMPLETED" });
       const latest = b.comic.chapters[0];
       const latestLabel = latest ? resolveChapterDisplayNumber(latest, latest.sourceChapter) : null;
       const lastUpdatedAt = (latest ? resolveChapterPublishedAt(latest, latest.sourceChapter) : null) ?? b.updatedAt;
@@ -89,7 +93,9 @@ export class UserService {
             latestChapter: latest ? { id: latest.id, number: latest.number, publishedAt: resolveChapterPublishedAt(latest, latest.sourceChapter), displayNumber: latestLabel } : null,
           },
           progress: {
-            readCount: read?.count ?? 0, percent: progressPercent(read?.count ?? 0, total), lastReadAt,
+            readCount: effectiveReadCount,
+            percent: progressPercent(effectiveReadCount, total),
+            lastReadAt,
             current: hist ? { chapterId: hist.chapter.id, number: hist.chapter.number, displayNumber: resolveChapterDisplayNumber(hist.chapter, hist.chapter.sourceChapter), imageIndex: hist.imageIndex } : null,
           },
         },

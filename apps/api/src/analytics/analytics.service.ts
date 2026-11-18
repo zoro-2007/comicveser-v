@@ -1,18 +1,19 @@
-import { Body, Controller, Get, HttpCode, Injectable, Module, Post, Query, Req } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Injectable, Module, Optional, Post, Query, Req } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { Type } from "class-transformer";
 import { IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from "class-validator";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { CacheService } from "../cache/cache.service";
 import { RequirePermission } from "../auth/auth.guard";
 import { optionalUserId } from "../common/optional-user";
 
 const TYPES = ["PAGE_VIEW", "COMIC_VIEW", "CHAPTER_VIEW", "SEARCH", "READ_SESSION"];
 class EventDto {
   @IsIn(TYPES) type: string;
-  @IsOptional() @IsString() @Length(10, 40) comicId?: string;
-  @IsOptional() @IsString() @Length(10, 40) chapterId?: string;
+  @IsOptional() @IsString() @Length(1, 64) comicId?: string;
+  @IsOptional() @IsString() @Length(1, 64) chapterId?: string;
   @IsOptional() @IsString() @Length(1, 200) path?: string;
   @IsOptional() @IsString() @Length(1, 100) query?: string;
 }
@@ -20,20 +21,55 @@ class RangeQuery { @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90) d
 
 @Injectable()
 export class AnalyticsService {
-  constructor(private db: PrismaService) {}
+  constructor(
+    private db: PrismaService,
+    @Optional() private cache?: CacheService,
+  ) {}
 
-  // The browser only calls this after the visitor accepts the consent banner. No IP address or cookie id is stored.
   async record(userId: string | null, d: EventDto) {
     let comicId = d.comicId;
-    if (d.type === "COMIC_VIEW" && comicId) {
-      const r = await this.db.comic.updateMany({ where: {
-        id: comicId, publishState: "PUBLISHED", deletedAt: null,
-        OR: this.db.publicComicOrFilter,
-      }, data: { views: { increment: 1 } } });
-      if (!r.count) comicId = undefined;
+    if (!comicId && d.chapterId) {
+      const ch = await this.db.chapter
+        .findUnique({ where: { id: d.chapterId }, select: { comicId: true } })
+        .catch(() => null);
+      if (ch?.comicId) comicId = ch.comicId;
     }
-    await this.db.analyticsEvent.create({ data: { type: d.type, userId, comicId, chapterId: d.chapterId,
-      path: d.path?.split("?")[0], query: d.type === "SEARCH" ? d.query?.trim().toLowerCase() : undefined } });
+
+    if ((d.type === "COMIC_VIEW" || d.type === "CHAPTER_VIEW") && comicId) {
+      const r = await this.db.comic.updateMany({
+        where: {
+          id: comicId,
+          publishState: "PUBLISHED",
+          deletedAt: null,
+          OR: this.db.publicComicOrFilter,
+        },
+        data: { views: { increment: 1 } },
+      });
+      if (!r.count) {
+        comicId = undefined;
+      } else if (this.cache) {
+        await Promise.all(
+          [
+            "comics:trending",
+            "comics:popular",
+            "comics:popular:weekly",
+            "comics:popular:monthly",
+            "comics:latest",
+          ].map((k) => this.cache?.delete(k)),
+        ).catch(() => undefined);
+      }
+    }
+
+    await this.db.analyticsEvent.create({
+      data: {
+        type: d.type,
+        userId,
+        comicId,
+        chapterId: d.chapterId,
+        path: d.path?.split("?")[0],
+        query: d.type === "SEARCH" ? d.query?.trim().toLowerCase() : undefined,
+      },
+    });
   }
 
   async summary(days: number) {
@@ -42,7 +78,7 @@ export class AnalyticsService {
       this.db.$queryRaw<{ day: Date; type: string; n: number }[]>(Prisma.sql`SELECT date_trunc('day', "createdAt")::date AS day, "type", COUNT(*)::int AS n FROM "AnalyticsEvent" WHERE "createdAt" >= ${since} GROUP BY 1, 2 ORDER BY 1`),
       this.db.$queryRaw<{ day: Date; n: number }[]>(Prisma.sql`SELECT date_trunc('day', "createdAt")::date AS day, COUNT(DISTINCT "userId")::int AS n FROM "AnalyticsEvent" WHERE "createdAt" >= ${since} AND "userId" IS NOT NULL GROUP BY 1 ORDER BY 1`),
       this.db.analyticsEvent.groupBy({ by: ["query"], where: { type: "SEARCH", createdAt: { gte: since }, query: { not: null } }, _count: { _all: true }, orderBy: { _count: { query: "desc" } }, take: 10 }),
-      this.db.analyticsEvent.groupBy({ by: ["comicId"], where: { type: "COMIC_VIEW", createdAt: { gte: since }, comicId: { not: null } }, _count: { _all: true }, orderBy: { _count: { comicId: "desc" } }, take: 100 }),
+      this.db.analyticsEvent.groupBy({ by: ["comicId"], where: { type: { in: ["COMIC_VIEW", "CHAPTER_VIEW"] }, createdAt: { gte: since }, comicId: { not: null } }, _count: { _all: true }, orderBy: { _count: { comicId: "desc" } }, take: 100 }),
     ]);
     const ids = comicViews.map((c) => c.comicId!);
     const [comics, links] = await Promise.all([
@@ -55,7 +91,9 @@ export class AnalyticsService {
     for (const l of links) genres.set(l.genre.name, (genres.get(l.genre.name) ?? 0) + (views.get(l.comicId) ?? 0));
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     return {
-      days, daily: daily.map((r) => ({ day: iso(r.day), type: r.type, n: r.n })), activeUsers: dau.map((r) => ({ day: iso(r.day), n: r.n })),
+      days,
+      daily: daily.map((r) => ({ day: iso(r.day), type: r.type, n: r.n })),
+      activeUsers: dau.map((r) => ({ day: iso(r.day), n: r.n })),
       topSearches: searches.map((s) => ({ query: s.query, n: s._count._all })),
       topComics: comicViews.slice(0, 10).map((c) => ({ title: title.get(c.comicId!) ?? "(removed)", n: c._count._all })),
       topGenres: [...genres].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, n]) => ({ name, n })),

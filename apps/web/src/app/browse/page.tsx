@@ -1,23 +1,31 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Track from "@/components/Track";
 import ComicCard from "@/components/ComicCard";
+import RequestComicModal from "@/components/RequestComicModal";
 import { CardGridSkeleton } from "@/components/LoadingSkeleton";
 import {
   BrowseQuery,
   Comic,
   GENRES,
+  GenreOption,
   MIN_CHAPTER_OPTIONS,
   SORTS,
   STATUSES,
   TYPES,
   browseComics,
+  getGenres,
+  slugifyGenre,
 } from "@/lib/comics";
 
 type Data = { items: Comic[]; total: number; page: number; pages: number };
 const EMPTY: Data = { items: [], total: 0, page: 1, pages: 1 };
+const DEFAULT_GENRE_OPTIONS: GenreOption[] = GENRES.map((name) => ({
+  name,
+  slug: slugifyGenre(name),
+}));
 
 function useDebounced(value: string, ms: number, onSettle: (v: string) => void) {
   const first = useRef(true);
@@ -42,7 +50,20 @@ function BrowseContent() {
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const lastQ = useRef<string | null>(null);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [availableGenres, setAvailableGenres] = useState<GenreOption[]>(DEFAULT_GENRE_OPTIONS);
+
+  useEffect(() => {
+    let active = true;
+    getGenres()
+      .then((list) => {
+        if (active && list.length > 0) setAvailableGenres(list);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const query: BrowseQuery = {
     q: sp.get("q") ?? undefined,
@@ -56,7 +77,36 @@ function BrowseContent() {
     sort: sp.get("sort") ?? "updated",
     page: sp.get("page") ?? "1",
   };
-  const selectedGenres = (query.genre ?? "").split(",").filter(Boolean);
+
+  // Normalize selected genres to consistent genre slugs
+  const selectedGenreSlugs = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (query.genre ?? "")
+            .split(",")
+            .map((g) => slugifyGenre(g))
+            .filter(Boolean),
+        ),
+      ),
+    [query.genre],
+  );
+
+  // Ensure any genre slug present in URL is also represented in the rendered chip list
+  const genreOptions = useMemo(() => {
+    const map = new Map<string, GenreOption>();
+    for (const g of availableGenres) map.set(g.slug, g);
+    for (const slug of selectedGenreSlugs) {
+      if (!map.has(slug)) {
+        const readableName = slug
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ""))
+          .join(" ");
+        map.set(slug, { name: readableName, slug });
+      }
+    }
+    return Array.from(map.values());
+  }, [availableGenres, selectedGenreSlugs]);
 
   const update = useCallback(
     (patch: Record<string, string | null>, keepPage = false) => {
@@ -113,10 +163,11 @@ function BrowseContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spKey, retry]);
 
-  const toggleGenre = (g: string) => {
-    const next = selectedGenres.includes(g)
-      ? selectedGenres.filter((x) => x !== g)
-      : [...selectedGenres, g];
+  const toggleGenre = (genreSlug: string) => {
+    const normalized = slugifyGenre(genreSlug);
+    const next = selectedGenreSlugs.includes(normalized)
+      ? selectedGenreSlugs.filter((x) => x !== normalized)
+      : [...selectedGenreSlugs, normalized];
     update({ genre: next.join(",") || null });
   };
   const single = (key: "status" | "type", value: string) =>
@@ -133,7 +184,7 @@ function BrowseContent() {
   };
 
   const hasFilters =
-    selectedGenres.length > 0 ||
+    selectedGenreSlugs.length > 0 ||
     !!query.status ||
     !!query.type ||
     !!query.creator ||
@@ -161,6 +212,7 @@ function BrowseContent() {
           <span className="count-badge" style={{ marginLeft: "auto" }} id="browseCount">
             {loading ? "…" : data.total}
           </span>
+          <RequestComicModal initialTitle={qInput.trim()} buttonLabel="+ Request a Comic" buttonClassName="pillbtn" />
         </div>
 
         <div className="browse-tools">
@@ -234,22 +286,27 @@ function BrowseContent() {
               <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>GENRES</span>
               <button
                 type="button"
-                className={`chip${selectedGenres.length === 0 ? " on" : ""}`}
+                className={`chip${selectedGenreSlugs.length === 0 ? " on" : ""}`}
+                aria-pressed={selectedGenreSlugs.length === 0}
                 onClick={() => update({ genre: null })}
               >
                 All
               </button>
-              {GENRES.map((g) => (
-                <button
-                  key={g}
-                  type="button"
-                  className={`chip${selectedGenres.includes(g) ? " on" : ""}`}
-                  aria-pressed={selectedGenres.includes(g)}
-                  onClick={() => toggleGenre(g)}
-                >
-                  {g}
-                </button>
-              ))}
+              {genreOptions.map((g) => {
+                const isSelected = selectedGenreSlugs.includes(g.slug);
+                return (
+                  <button
+                    key={g.slug}
+                    type="button"
+                    data-genre-slug={g.slug}
+                    className={`chip${isSelected ? " on" : ""}`}
+                    aria-pressed={isSelected}
+                    onClick={() => toggleGenre(g.slug)}
+                  >
+                    {g.name}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="browse-tools" style={{ marginBottom: 8 }}>
@@ -297,7 +354,7 @@ function BrowseContent() {
             </div>
 
             <div className="browse-tools" style={{ marginBottom: 0 }}>
-              <label className="s-search" >
+              <label className="s-search">
                 <input
                   value={creatorInput}
                   onChange={(e) => setCreatorInput(e.target.value)}
@@ -347,14 +404,15 @@ function BrowseContent() {
           </div>
         ) : data.items.length === 0 ? (
           <div className="empty-note" id="browseEmpty">
-            No comics match those filters. Try a different genre or clear the search.
-            {hasFilters && (
-              <div style={{ marginTop: 12 }}>
-                <button type="button" onClick={resetAll} className="pillbtn">
+            No comics match those filters. Try a different genre, clear the search, or request this comic directly to our admins.
+            <div style={{ marginTop: 12, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+              {hasFilters && (
+                <button type="button" onClick={resetAll} className="pillbtn ghost">
                   Reset filters
                 </button>
-              </div>
-            )}
+              )}
+              <RequestComicModal initialTitle={qInput.trim()} buttonLabel={qInput.trim() ? `+ Request "${qInput.trim().slice(0, 28)}" to Admin` : "+ Request a Missing Comic"} buttonClassName="pillbtn" />
+            </div>
           </div>
         ) : (
           <div className={`browse-grid ${loading ? "opacity-60" : ""}`} id="browseGrid">

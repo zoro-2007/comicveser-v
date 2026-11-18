@@ -3,15 +3,18 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { TABS, tabIndex } from "@/lib/nav";
-import { BrowseQuery, Comic, browseComics } from "@/lib/comics";
+import { BrowseQuery, Comic, browseComics, formatRating, slugifyGenre } from "@/lib/comics";
 import { Cover } from "./ComicCard";
+import RequestComicModal from "./RequestComicModal";
 
-const TRENDING_CHIPS = [
+const QUICK_GENRE_CHIPS = [
   "Action",
   "Fantasy",
   "Adventure",
   "Martial Arts",
   "Reincarnation",
+  "Romance",
+  "Murim",
   "Sci-Fi",
 ];
 
@@ -43,7 +46,8 @@ export function DesktopLinks() {
 }
 
 /**
- * Full-width Asura search bar under the purple header (triggered by clicking the search icon or pressing Ctrl+K).
+ * Responsive Search Overlay under the purple header (triggered by clicking the search icon or pressing Ctrl+K).
+ * Does NOT pre-populate comic titles when opened; only fetches matching comics once the user types a query.
  */
 export function SearchControl() {
   const [open, setOpen] = useState(false);
@@ -61,6 +65,10 @@ export function SearchControl() {
   useEffect(() => {
     if (open) {
       inputRef.current?.focus();
+    } else {
+      setQ("");
+      setResults([]);
+      setLoading(false);
     }
   }, [open]);
 
@@ -79,11 +87,17 @@ export function SearchControl() {
 
   useEffect(() => {
     if (!open) return;
+    const trimmed = q.trim();
+    if (!trimmed) {
+      setResults([]);
+      setLoading(false);
+      return;
+    }
     let active = true;
+    setLoading(true);
     const timer = setTimeout(() => {
-      setLoading(true);
       const query: BrowseQuery = {
-        q: q.trim() || undefined,
+        q: trimmed,
         sort: "popular",
         page: "1",
       };
@@ -113,6 +127,8 @@ export function SearchControl() {
     setOpen(false);
     router.push(trimmed ? `/browse?q=${encodeURIComponent(trimmed)}` : "/browse");
   };
+
+  const trimmedQuery = q.trim();
 
   return (
     <>
@@ -151,126 +167,164 @@ export function SearchControl() {
       </button>
 
       {open && (
-        <div
-          className="full-search"
-          data-layer="Full Search / Open State"
-          style={{ position: "absolute", left: 0, right: 0, top: "100%" }}
-        >
-          <div className="wrap">
-            <form onSubmit={handleSubmit} role="search" className="fs-bar">
-              <label className="fs-pill">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  aria-hidden="true"
-                >
-                  <circle cx="11" cy="11" r="7" />
-                  <path d="m20 20-3.8-3.8" />
-                </svg>
-                <input
-                  ref={inputRef}
-                  name="q"
-                  type="search"
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search comics, manga, manhwa..."
-                  aria-label="Search comics, manga, manhwa"
-                />
-                {q && (
+        <>
+          <div
+            className="fs-backdrop"
+            aria-hidden="true"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className="full-search"
+            data-layer="Full Search / Open State"
+            style={{ position: "absolute", left: 0, right: 0, top: "100%" }}
+          >
+            <div className="wrap">
+              <div className="fs-card">
+                <form onSubmit={handleSubmit} role="search" className="fs-bar">
+                  <label className="fs-pill">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      aria-hidden="true"
+                    >
+                      <circle cx="11" cy="11" r="7" />
+                      <path d="m20 20-3.8-3.8" />
+                    </svg>
+                    <input
+                      ref={inputRef}
+                      name="q"
+                      type="search"
+                      value={q}
+                      onChange={(e) => setQ(e.target.value)}
+                      placeholder="Search comics, manga, manhwa by title or author..."
+                      aria-label="Search comics, manga, manhwa"
+                    />
+                    {q && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQ("");
+                          inputRef.current?.focus();
+                        }}
+                        aria-label="Clear search"
+                        className="fs-clear-btn"
+                      >
+                        ✕
+                      </button>
+                    )}
+                    <kbd className="fs-kbd">ESC</kbd>
+                  </label>
                   <button
                     type="button"
-                    onClick={() => {
-                      setQ("");
-                      inputRef.current?.focus();
-                    }}
-                    aria-label="Clear search"
-                    className="grid h-6 w-6 place-items-center rounded-full bg-[#2b2839] text-xs font-bold text-[#cfcbe0] hover:bg-[#9333ea] hover:text-white"
+                    className="fs-cancel"
+                    aria-label="Cancel search"
+                    onClick={() => setOpen(false)}
                   >
-                    ✕
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M5 5l14 14M19 5L5 19" />
+                    </svg>
                   </button>
-                )}
-              </label>
-              <button
-                type="button"
-                className="fs-cancel"
-                aria-label="Cancel search"
-                onClick={() => setOpen(false)}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  aria-hidden="true"
-                >
-                  <path d="M5 5l14 14M19 5L5 19" />
-                </svg>
-              </button>
-            </form>
+                </form>
 
-            <div className="fs-label">
-              {q.trim() ? `Results for “${q.trim()}”` : "Trending searches"}
-            </div>
-            <div className="fs-chips">
-              {TRENDING_CHIPS.map((chip) => (
-                <button
-                  key={chip}
-                  type="button"
-                  className="chip"
-                  onClick={() => {
-                    setQ(chip);
-                    inputRef.current?.focus();
-                  }}
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
+                <div className="fs-meta-bar">
+                  <span className="fs-label" style={{ margin: 0 }}>
+                    {trimmedQuery ? `Results for “${trimmedQuery}”` : "Browse by Genre"}
+                  </span>
+                  <RequestComicModal
+                    initialTitle={trimmedQuery}
+                    buttonLabel="+ Request a Comic"
+                    buttonClassName="fs-req-link"
+                  />
+                </div>
 
-            <div className="fs-results">
-              {loading && results.length === 0 ? (
-                <div className="fs-empty">Searching catalogue…</div>
-              ) : results.length > 0 ? (
-                results.map((c) => {
-                  const ratingText = c.rating && c.rating > 0 ? c.rating.toFixed(1) : "9.5";
-                  const count = c.chapterCount || c.chapters.length;
-                  return (
+                <div className="fs-chips">
+                  {QUICK_GENRE_CHIPS.map((chip) => (
                     <Link
-                      key={c.id}
-                      href={`/comics/${c.slug}`}
-                      className="fs-item"
+                      key={chip}
+                      href={`/browse?genre=${encodeURIComponent(slugifyGenre(chip))}`}
+                      className="chip"
                       onClick={() => setOpen(false)}
                     >
-                      <Cover
-                        hue={c.hue}
-                        title={c.title}
-                        src={c.coverUrl}
-                        className="fs-thumb !p-0.5"
-                      />
-                      <span style={{ minWidth: 0 }}>
-                        <span className="ft">{c.title}</span>
-                        <span className="fm">
-                          {count} Chapters · {c.status || "Ongoing"}
-                        </span>
-                      </span>
-                      <span className="fr">★ {ratingText}</span>
+                      {chip}
                     </Link>
-                  );
-                })
-              ) : (
-                <div className="fs-empty">
-                  {q.trim()
-                    ? `No comics match “${q.trim()}”. Press Enter to search the full catalogue.`
-                    : "Type a title above or pick a chip to search comics."}
+                  ))}
                 </div>
-              )}
+
+                {trimmedQuery && (
+                  <div className="fs-results-wrap" aria-live="polite">
+                    {loading && results.length === 0 ? (
+                      <div className="fs-empty">Searching catalogue…</div>
+                    ) : results.length > 0 ? (
+                      <>
+                        <div className="fs-results">
+                          {results.map((c) => {
+                            const count = c.chapterCount || c.chapters.length;
+                            const ratingLabel = formatRating(c);
+                            return (
+                              <Link
+                                key={c.id}
+                                href={`/comics/${c.slug}`}
+                                className="fs-item"
+                                onClick={() => setOpen(false)}
+                              >
+                                <Cover
+                                  hue={c.hue}
+                                  title={c.title}
+                                  src={c.coverUrl}
+                                  className="fs-thumb !p-0.5"
+                                />
+                                <span className="fs-item-body">
+                                  <span className="ft">{c.title}</span>
+                                  <span className="fm">
+                                    <span className="fs-type-badge">{c.type || "Manhwa"}</span>
+                                    <span>{count} Chapters</span>
+                                    <span>·</span>
+                                    <span>{c.status || "Ongoing"}</span>
+                                  </span>
+                                </span>
+                                {ratingLabel !== "Not Rated" && (
+                                  <span className="fr">★ {ratingLabel}</span>
+                                )}
+                              </Link>
+                            );
+                          })}
+                        </div>
+                        <div className="fs-footer">
+                          <Link
+                            href={`/browse?q=${encodeURIComponent(trimmedQuery)}`}
+                            className="fs-view-all"
+                            onClick={() => setOpen(false)}
+                          >
+                            View all results for “{trimmedQuery}” →
+                          </Link>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="fs-empty fs-empty-box">
+                        <span>No comics match “{trimmedQuery}” on ComicVerse yet.</span>
+                        <RequestComicModal
+                          initialTitle={trimmedQuery}
+                          buttonLabel={`+ Request "${trimmedQuery.slice(0, 28)}" to Admin`}
+                          buttonClassName="pillbtn"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        </>
       )}
     </>
   );

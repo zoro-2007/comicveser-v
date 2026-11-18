@@ -179,7 +179,7 @@ test("SetRepo Section 2C, 3, 4, 6: Codebase static verification for dynamic code
   assert.ok(!htmlTsCode.includes("new RegExp"), "html.ts must use precompiled TAG_PATTERNS instead of dynamic new RegExp");
 
   const webApiCode = fs.readFileSync(path.join(PROJECT_ROOT, "apps/web/src/lib/api.ts"), "utf8");
-  assert.ok(webApiCode.includes("AbortController") && webApiCode.includes("15_000"), "web/src/lib/api.ts must enforce a request timeout");
+  assert.ok(webApiCode.includes("AbortController") && (webApiCode.includes("15_000") || webApiCode.includes("45_000")), "web/src/lib/api.ts must enforce a request timeout");
 
   const comicCardCode = fs.readFileSync(path.join(PROJECT_ROOT, "apps/web/src/components/ComicCard.tsx"), "utf8");
   assert.ok(comicCardCode.includes("Bookmarked") && comicCardCode.includes("Bookmark") && comicCardCode.includes("Chapters"), "ComicCard.tsx must implement the redesigned card with Chapters pill, Status pill, and Bookmark/Bookmarked button");

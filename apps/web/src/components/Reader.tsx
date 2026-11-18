@@ -37,16 +37,16 @@ function Page({ img, idx, paged, zoom }: { img: Img; idx: number; paged: boolean
   );
   const el = status === "error" ? null : (
     // eslint-disable-next-line @next/next/no-img-element
-    <img key={tries} src={img.url} alt={`Page ${idx + 1}`} width={img.width || undefined} height={img.height || undefined} referrerPolicy="no-referrer" decoding="async" draggable={false}
+    <img key={tries} src={img.url} alt={`Page ${idx + 1}`} width={img.width || undefined} height={img.height || undefined} referrerPolicy="no-referrer" decoding="async" draggable={false} onContextMenu={(e) => e.preventDefault()} onDragStart={(e) => e.preventDefault()}
       loading={paged || idx < 2 ? "eager" : "lazy"}
       className={paged ? `${status === "ok" ? "" : "hidden "}${zoom === 1 ? "mx-auto block max-h-[100dvh] w-auto max-w-full" : "block max-w-none"}` : "rd-img"}
       style={paged && zoom !== 1 ? { width: `${zoom * 100}%` } : undefined} onLoad={() => setStatus("ok")}
       onError={() => { if (tries < 2) setTimeout(() => setTries((t) => t + 1), 1000 * (tries + 1)); else setStatus("error"); }} />
   );
-  if (paged) return <div data-idx={idx}>{status === "loading" && <div className="skeleton h-[60vh] w-full" />}{status === "error" ? failed : el}</div>;
+  if (paged) return <div data-idx={idx} onContextMenu={(e) => e.preventDefault()} className="select-none">{status === "loading" && <div className="skeleton h-[60vh] w-full" />}{status === "error" ? failed : el}</div>;
   // Reserve the exact space (aspect ratio) so images never shift the layout while they load.
   return (
-    <div data-idx={idx} style={img.width > 0 && img.height > 0 ? { aspectRatio: `${img.width} / ${img.height}` } : { minHeight: "40vh" }} className="relative w-full bg-[#0a0a0a]">
+    <div data-idx={idx} style={img.width > 0 && img.height > 0 ? { aspectRatio: `${img.width} / ${img.height}` } : { minHeight: "40vh" }} onContextMenu={(e) => e.preventDefault()} className="relative w-full select-none bg-[#0a0a0a]">
       {status === "loading" && <div className="skeleton absolute inset-0 !rounded-none" />}
       {status === "error" ? <div className="absolute inset-0">{failed}</div> : el}
     </div>
@@ -95,6 +95,18 @@ export default function Reader({ slug, meta, initial, chapters, external, source
       imagesRef.current = [...imagesRef.current, ...d.items]; setImages(imagesRef.current);
     } catch { setLoadError(true); } finally { busy.current = false; }
   }, [meta.id, meta.imageCount, external]);
+
+  // Disable browser right-click context menu & image drag while reading a chapter.
+  useEffect(() => {
+    const preventContext = (e: MouseEvent) => e.preventDefault();
+    const preventDrag = (e: DragEvent) => e.preventDefault();
+    document.addEventListener("contextmenu", preventContext);
+    document.addEventListener("dragstart", preventDrag);
+    return () => {
+      document.removeEventListener("contextmenu", preventContext);
+      document.removeEventListener("dragstart", preventDrag);
+    };
+  }, []);
 
   // Saved reading preferences.
   useEffect(() => {
@@ -249,7 +261,7 @@ export default function Reader({ slug, meta, initial, chapters, external, source
   const toTop = () => { if (paged) { setCurrent(0); window.scrollTo({ top: 0 }); } else window.scrollTo({ top: 0, behavior: "smooth" }); };
 
   return (
-    <div className="rd-root">
+    <div className="rd-root select-none" onContextMenu={(e) => e.preventDefault()} onDragStart={(e) => e.preventDefault()}>
       <div onClick={onReadingClick} className="min-h-[100dvh]">
         {meta.imageCount === 0 && (
           <div className="mx-auto max-w-2xl px-4 pb-28 pt-24 text-center">

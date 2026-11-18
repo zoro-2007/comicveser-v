@@ -1,9 +1,25 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import ComicCard from "@/components/ComicCard";
-import { BrowseQuery, Comic, GENRES, SORTS, STATUSES, browseComics } from "@/lib/comics";
+import RequestComicModal from "@/components/RequestComicModal";
+import {
+  BrowseQuery,
+  Comic,
+  GENRES,
+  GenreOption,
+  SORTS,
+  STATUSES,
+  browseComics,
+  getGenres,
+  slugifyGenre,
+} from "@/lib/comics";
+
+const DEFAULT_GENRE_OPTIONS: GenreOption[] = GENRES.map((name) => ({
+  name,
+  slug: slugifyGenre(name),
+}));
 
 function MangaContent() {
   const router = useRouter();
@@ -16,14 +32,55 @@ function MangaContent() {
   });
   const [loading, setLoading] = useState(true);
   const [qInput, setQInput] = useState(searchParams.get("q") ?? "");
+  const [availableGenres, setAvailableGenres] = useState<GenreOption[]>(DEFAULT_GENRE_OPTIONS);
 
-  const activeGenre = searchParams.get("genre") ?? "";
+  useEffect(() => {
+    let active = true;
+    getGenres()
+      .then((list) => {
+        if (active && list.length > 0) setAvailableGenres(list);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const rawGenreParam = searchParams.get("genre") ?? "";
+  const selectedGenreSlugs = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          rawGenreParam
+            .split(",")
+            .map((g) => slugifyGenre(g))
+            .filter(Boolean),
+        ),
+      ),
+    [rawGenreParam],
+  );
   const activeStatus = searchParams.get("status") ?? "";
   const activeSort = searchParams.get("sort") ?? "updated";
 
+  const genreOptions = useMemo(() => {
+    const map = new Map<string, GenreOption>();
+    for (const g of availableGenres) map.set(g.slug, g);
+    for (const slug of selectedGenreSlugs) {
+      if (!map.has(slug)) {
+        const readableName = slug
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ""))
+          .join(" ");
+        map.set(slug, { name: readableName, slug });
+      }
+    }
+    return Array.from(map.values());
+  }, [availableGenres, selectedGenreSlugs]);
+
+  // Strictly filter the /manga page to type = "Manga" only
   const query: BrowseQuery = {
     q: searchParams.get("q") ?? undefined,
-    genre: activeGenre || undefined,
+    genre: selectedGenreSlugs.join(",") || undefined,
     type: "Manga",
     status: activeStatus || undefined,
     sort: activeSort,
@@ -40,7 +97,14 @@ function MangaContent() {
     browseComics(query)
       .then((res) => {
         if (active) {
-          setData(res);
+          const mangaOnly = (res.items ?? []).filter(
+            (c) => (c.type ?? "Manga").toLowerCase() === "manga",
+          );
+          setData({
+            ...res,
+            items: mangaOnly,
+            total: res.items.length === mangaOnly.length ? res.total : mangaOnly.length,
+          });
           setLoading(false);
         }
       })
@@ -58,6 +122,7 @@ function MangaContent() {
 
   const updateParams = (patch: Record<string, string | null>, keepPage = false) => {
     const u = new URLSearchParams(searchParams.toString());
+    u.delete("type");
     Object.entries(patch).forEach(([k, v]) => {
       if (!v) u.delete(k);
       else u.set(k, v);
@@ -65,6 +130,14 @@ function MangaContent() {
     if (!keepPage) u.delete("page");
     const qs = u.toString();
     router.push(qs ? `/manga?${qs}` : "/manga");
+  };
+
+  const toggleGenre = (slug: string) => {
+    const normalized = slugifyGenre(slug);
+    const next = selectedGenreSlugs.includes(normalized)
+      ? selectedGenreSlugs.filter((x) => x !== normalized)
+      : [...selectedGenreSlugs, normalized];
+    updateParams({ genre: next.join(",") || null });
   };
 
   return (
@@ -80,6 +153,11 @@ function MangaContent() {
           <span className="count-badge" style={{ marginLeft: "auto" }} id="mMangaCount">
             {loading ? "…" : `${data.total} manga`}
           </span>
+          <RequestComicModal
+            initialTitle={qInput.trim()}
+            buttonLabel="+ Request a Comic"
+            buttonClassName="pillbtn"
+          />
         </div>
 
         <form
@@ -97,7 +175,7 @@ function MangaContent() {
               type="search"
               value={qInput}
               onChange={(e) => setQInput(e.target.value)}
-              placeholder="Search comics, manga, manhwa..."
+              placeholder="Search manga..."
               aria-label="Search manga"
             />
           </label>
@@ -137,36 +215,47 @@ function MangaContent() {
         <div className="browse-tools" style={{ marginBottom: 0 }}>
           <button
             type="button"
-            className={`chip${!activeGenre ? " on" : ""}`}
+            className={`chip${selectedGenreSlugs.length === 0 ? " on" : ""}`}
+            aria-pressed={selectedGenreSlugs.length === 0}
             onClick={() => updateParams({ genre: null })}
           >
             All
           </button>
-          {GENRES.slice(0, 10).map((g) => (
-            <button
-              key={g}
-              type="button"
-              className={`chip${activeGenre === g ? " on" : ""}`}
-              onClick={() => updateParams({ genre: activeGenre === g ? null : g })}
-            >
-              {g}
-            </button>
-          ))}
+          {genreOptions.map((g) => {
+            const isSelected = selectedGenreSlugs.includes(g.slug);
+            return (
+              <button
+                key={g.slug}
+                type="button"
+                data-genre-slug={g.slug}
+                className={`chip${isSelected ? " on" : ""}`}
+                aria-pressed={isSelected}
+                onClick={() => toggleGenre(g.slug)}
+              >
+                {g.name}
+              </button>
+            );
+          })}
         </div>
       </section>
 
       <section className="panel" data-layer="Manga List" style={{ marginTop: 18 }}>
         {!loading && data.items.length === 0 ? (
           <div className="empty-note" id="mMangaEmpty">
-            No manga match these filters. Try another genre or clear the search.
-            <div style={{ marginTop: 12 }}>
+            No manga match these filters. Try another genre, clear the search, or request this manga to our admins.
+            <div style={{ marginTop: 12, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
               <button
                 type="button"
                 onClick={() => router.push("/manga")}
-                className="pillbtn"
+                className="pillbtn ghost"
               >
                 Reset filters
               </button>
+              <RequestComicModal
+                initialTitle={qInput.trim()}
+                buttonLabel={qInput.trim() ? `+ Request "${qInput.trim().slice(0, 28)}" to Admin` : "+ Request a Missing Manga"}
+                buttonClassName="pillbtn"
+              />
             </div>
           </div>
         ) : (

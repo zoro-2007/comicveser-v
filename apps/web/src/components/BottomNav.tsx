@@ -64,15 +64,22 @@ const TAB_SVGS: Record<string, React.ReactNode> = {
 };
 
 /**
- * Floating Mobile Bottom Navigation Bar (.m-bottomnav) matching the Asura Figma phone frames:
- * Home · Manga · Browse · Bookmarks.
+ * Floating Frosted-Glass Mobile Bottom Navigation Bar (.m-bottomnav):
+ * - Rounded transparent liquid-glass capsule with backdrop blur, subtle white specular border,
+ *   soft shadow & purple glow, evenly spaced 4-column layout (grid-cols-4), and luminous active-tab pill bubble.
+ * - Preserves ComicVerse's four navigation items: Home, Manga, Browse, and Bookmarks.
+ * - Respects iOS safe-area insets and hides automatically on desktop (>=1024px).
  */
 export default function BottomNav() {
   const path = usePathname();
   const active = tabIndex(path);
 
   return (
-    <nav aria-label="Primary" className="m-bottomnav" data-layer="Bottom Tab Bar">
+    <nav
+      aria-label="Primary mobile navigation"
+      className="m-bottomnav grid-cols-4"
+      data-layer="Bottom Tab Bar"
+    >
       {TABS.map(({ href, label }, i) => {
         const isOn = i === active || (href === "/manga" && path?.startsWith("/comics/"));
         return (
@@ -80,10 +87,11 @@ export default function BottomNav() {
             key={href}
             href={href}
             aria-current={isOn ? "page" : undefined}
-            className={isOn ? "on" : undefined}
+            className={`m-bottomnav-item${isOn ? " on" : ""}`}
           >
+            <span className="m-bottomnav-pill" aria-hidden="true" />
             <span className="bic">{TAB_SVGS[label]}</span>
-            <span>{label}</span>
+            <span className="m-bottomnav-label">{label}</span>
           </Link>
         );
       })}

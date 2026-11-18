@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Cover } from "./ComicCard";
 import { ApiError, api } from "@/lib/api";
@@ -10,6 +10,13 @@ import { useAuth } from "./AuthProvider";
 
 type Status = "READING" | "COMPLETED" | "PLAN_TO_READ" | "ON_HOLD" | "DROPPED";
 type Sort = "updated" | "added" | "title";
+interface ChapterSummary {
+  id: string;
+  number: number;
+  displayNumber?: string;
+  title?: string;
+  publishedAt?: string | null;
+}
 interface Item {
   bookmarkedAt: string;
   lastUpdatedAt: string | null;
@@ -82,15 +89,14 @@ function formatTypeLabel(raw?: string | null): string {
 }
 
 /**
- * Bookmarks Library matching reference screenshots 36691.jpg & 36692.jpg 1:1:
- * - Collapsible "Continue Reading" horizontal card carousel with cover, title, X dismiss button,
- *   purple percentage, purple progress bar, and "Ch. X" / "Ch. Total" footer.
- * - Clean 2-column mobile / 4-column desktop poster grid where each card shows:
- *   - Top-left status pill with colored dot ("Plan to Read", "On Hold", "Reading", etc.)
- *   - Bottom-right dark badge with gold fraction ("0/348", "65/132", "170/197", "79/102")
- *   - Bottom dark bar with 1-line truncated comic title.
- * - Clicking any card opens the Bookmark Detail Modal (36692.jpg) with circular -/+ chapter stepper,
- *   "Set to Chapter X" button, progress bar, colored-dot status dropdown, and [▶ Chapter X] [ⓘ] [🗑] buttons.
+ * Bookmarks Library:
+ * - Separate accessible click targets on each bookmark card:
+ *   - Clicking the comic cover/image opens the Bookmark Detail Popup.
+ *   - Clicking the comic title/name opens the comic detail page (/comics/[slug]).
+ * - Inside the Bookmark Detail Popup:
+ *   - Changing reading status immediately saves via PUT /user/bookmarks/:comicId/status.
+ *   - Clicking + or − or Set to Latest resolves the real chapterId and persists reading position via POST /user/progress and POST /user/chapters/:chapterId/read.
+ *   - Displays Saving, Saved, or Error feedback and refreshes bookmark cards and Continue Reading automatically.
  */
 export default function BookmarksView() {
   const router = useRouter();
@@ -110,9 +116,13 @@ export default function BookmarksView() {
   const [continueOpen, setContinueOpen] = useState(true);
   const [dismissedContinueIds, setDismissedContinueIds] = useState<Record<string, boolean>>({});
 
-  // Bookmark Detail Modal state
+  // Bookmark Detail Modal state & chapter cache
   const [modalItem, setModalItem] = useState<Item | null>(null);
   const [modalChapNum, setModalChapNum] = useState<number>(1);
+  const [modalChapters, setModalChapters] = useState<ChapterSummary[]>([]);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveMessage, setSaveMessage] = useState<string>("");
+  const chaptersCacheRef = useRef<Map<string, ChapterSummary[]>>(new Map());
 
   useEffect(() => {
     try {
@@ -149,6 +159,11 @@ export default function BookmarksView() {
           return;
         }
         setData(r);
+        setModalItem((prev) => {
+          if (!prev) return null;
+          const updated = r.items.find((x) => x.comic.id === prev.comic.id);
+          return updated ?? prev;
+        });
         setState("ok");
       })
       .catch((e) => {
@@ -162,9 +177,29 @@ export default function BookmarksView() {
 
   const reload = useCallback(() => setReloadTick((n) => n + 1), []);
 
+  const loadChaptersForComic = useCallback(async (comicId: string): Promise<ChapterSummary[]> => {
+    const cached = chaptersCacheRef.current.get(comicId);
+    if (cached && cached.length > 0) return cached;
+    try {
+      const list = await api<ChapterSummary[]>(`/comics/${encodeURIComponent(comicId)}/chapters?order=asc`, {
+        cache: "no-store",
+      });
+      if (Array.isArray(list)) {
+        const sorted = [...list].sort((a, b) => a.number - b.number);
+        chaptersCacheRef.current.set(comicId, sorted);
+        return sorted;
+      }
+    } catch {
+      // Fall back to empty array if chapters endpoint fails
+    }
+    return [];
+  }, []);
+
   const remove = async (it: Item) => {
     setBusy(it.comic.id);
     setErr("");
+    setSaveState("saving");
+    setSaveMessage("Saving…");
     try {
       await act(`/user/bookmarks/${it.comic.id}`, "DELETE");
       setData((d) =>
@@ -177,9 +212,13 @@ export default function BookmarksView() {
           : d,
       );
       if (modalItem?.comic.id === it.comic.id) setModalItem(null);
+      setSaveState("idle");
+      setSaveMessage("");
       reload();
       window.dispatchEvent(new Event("cv:bookmarks"));
     } catch {
+      setSaveState("error");
+      setSaveMessage("Error: Couldn't remove bookmark.");
       setErr("Couldn't remove that bookmark. Please try again.");
     } finally {
       setBusy(null);
@@ -189,14 +228,179 @@ export default function BookmarksView() {
   const setStatus = async (it: Item, s: Status | "AUTO") => {
     setBusy(it.comic.id);
     setErr("");
+    setSaveState("saving");
+    setSaveMessage("Saving…");
     try {
-      await act(`/user/bookmarks/${it.comic.id}`, "PUT", { status: s });
-      if (modalItem?.comic.id === it.comic.id && s !== "AUTO") {
-        setModalItem({ ...modalItem, status: s, statusSource: "manual" });
+      await act(`/user/bookmarks/${encodeURIComponent(it.comic.id)}/status`, "PUT", { status: s });
+      if (s !== "AUTO") {
+        setModalItem((prev) =>
+          prev && prev.comic.id === it.comic.id
+            ? { ...prev, status: s, statusSource: "manual" }
+            : prev,
+        );
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                items: prev.items.map((x) =>
+                  x.comic.id === it.comic.id ? { ...x, status: s, statusSource: "manual" } : x,
+                ),
+              }
+            : prev,
+        );
       }
+      setSaveState("saved");
+      setSaveMessage("Saved");
       reload();
-    } catch {
-      setErr("Couldn't update that status. Please try again.");
+      window.dispatchEvent(new Event("cv:bookmarks"));
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : "Couldn't update that status. Please try again.";
+      setSaveState("error");
+      setSaveMessage(`Error: ${msg}`);
+      setErr(msg);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveChapterSelection = async (
+    it: Item,
+    targetMode: { type: "step"; delta: -1 | 1 } | { type: "latest" } | { type: "number"; number: number },
+  ) => {
+    setBusy(it.comic.id);
+    setErr("");
+    setSaveState("saving");
+    setSaveMessage("Saving…");
+
+    try {
+      let chapters = modalChapters.length > 0 ? modalChapters : await loadChaptersForComic(it.comic.id);
+      if (chapters.length > 0 && modalChapters.length === 0) {
+        setModalChapters(chapters);
+      }
+
+      let targetChapter: ChapterSummary | null = null;
+      const totalCh = it.comic.totalChapters || chapters.length;
+
+      if (targetMode.type === "latest") {
+        if (chapters.length > 0) {
+          targetChapter = chapters[chapters.length - 1];
+        } else if (it.comic.latestChapter) {
+          targetChapter = {
+            id: it.comic.latestChapter.id,
+            number: it.comic.latestChapter.number,
+            displayNumber: it.comic.latestChapter.displayNumber,
+          };
+        }
+      } else if (targetMode.type === "step") {
+        if (chapters.length > 0) {
+          const currentId = it.progress.current?.chapterId;
+          let curIdx = chapters.findIndex(
+            (ch) => (currentId && ch.id === currentId) || Math.abs(ch.number - modalChapNum) < 0.001,
+          );
+          if (curIdx === -1) {
+            // Find closest chapter to modalChapNum
+            curIdx = chapters.reduce(
+              (bestIdx, ch, idx) =>
+                Math.abs(ch.number - modalChapNum) < Math.abs(chapters[bestIdx].number - modalChapNum)
+                  ? idx
+                  : bestIdx,
+              0,
+            );
+          }
+          const nextIdx = Math.min(chapters.length - 1, Math.max(0, curIdx + targetMode.delta));
+          targetChapter = chapters[nextIdx];
+        } else {
+          const nextNum = Math.min(totalCh || 1, Math.max(1, modalChapNum + targetMode.delta));
+          if (it.comic.latestChapter && nextNum === it.comic.latestChapter.number) {
+            targetChapter = {
+              id: it.comic.latestChapter.id,
+              number: it.comic.latestChapter.number,
+              displayNumber: it.comic.latestChapter.displayNumber,
+            };
+          } else if (it.progress.current && nextNum === it.progress.current.number) {
+            targetChapter = {
+              id: it.progress.current.chapterId,
+              number: it.progress.current.number,
+              displayNumber: it.progress.current.displayNumber,
+            };
+          }
+        }
+      } else {
+        targetChapter =
+          chapters.find((ch) => Math.abs(ch.number - targetMode.number) < 0.001) ??
+          chapters[Math.min(chapters.length - 1, Math.max(0, targetMode.number - 1))] ??
+          null;
+      }
+
+      if (!targetChapter || !targetChapter.id) {
+        throw new Error("Could not find a published chapter for that position.");
+      }
+
+      const resolvedNum = targetChapter.number;
+      const resolvedDisplay = targetChapter.displayNumber ?? String(resolvedNum);
+      setModalChapNum(resolvedNum);
+
+      // Persist both reading history position and read-chapter record using the real chapterId
+      await act("/user/progress", "POST", {
+        comicId: it.comic.id,
+        chapterId: targetChapter.id,
+        imageIndex: 0,
+        scrollY: 0,
+      });
+      await act(`/user/chapters/${encodeURIComponent(targetChapter.id)}/read`, "POST").catch(() => undefined);
+
+      const newPercent =
+        totalCh > 0 ? Math.min(100, Math.round((resolvedNum / totalCh) * 100)) : it.progress.percent;
+      const newReadCount = Math.max(it.progress.readCount, Math.min(totalCh || resolvedNum, Math.floor(resolvedNum)));
+      const newCurrent = {
+        chapterId: targetChapter.id,
+        number: resolvedNum,
+        displayNumber: resolvedDisplay,
+        imageIndex: 0,
+      };
+      const newStatus: Status =
+        it.statusSource === "manual"
+          ? it.status
+          : it.comic.status === "COMPLETED" && totalCh > 0 && newReadCount >= totalCh
+          ? "COMPLETED"
+          : "READING";
+
+      // Make sure comic is not hidden in Continue Reading if the user just updated its chapter
+      if (dismissedContinueIds[it.comic.id]) {
+        const nextDismissed = { ...dismissedContinueIds };
+        delete nextDismissed[it.comic.id];
+        setDismissedContinueIds(nextDismissed);
+        try {
+          localStorage.setItem("cv:bm:dismissedContinue", JSON.stringify(nextDismissed));
+        } catch {}
+      }
+
+      const applyItemUpdate = (item: Item): Item =>
+        item.comic.id !== it.comic.id
+          ? item
+          : {
+              ...item,
+              status: newStatus,
+              progress: {
+                ...item.progress,
+                readCount: newReadCount,
+                percent: newPercent,
+                lastReadAt: new Date().toISOString(),
+                current: newCurrent,
+              },
+            };
+
+      setModalItem((prev) => (prev ? applyItemUpdate(prev) : prev));
+      setData((prev) => (prev ? { ...prev, items: prev.items.map(applyItemUpdate) } : prev));
+      setSaveState("saved");
+      setSaveMessage("Saved");
+      reload();
+      window.dispatchEvent(new Event("cv:bookmarks"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Couldn't save reading chapter.";
+      setSaveState("error");
+      setSaveMessage(`Error: ${msg}`);
+      setErr(msg);
     } finally {
       setBusy(null);
     }
@@ -224,9 +428,15 @@ export default function BookmarksView() {
     let sumPct = 0;
     for (const it of list) {
       totalCh += it.comic.totalChapters || 0;
-      sumPct += it.progress.percent || 0;
-      const readNum = it.progress.current?.number ?? it.progress.readCount ?? 0;
-      if (it.comic.totalChapters > readNum) waiting++;
+      const curNum = it.progress.current?.number ?? it.progress.readCount ?? 0;
+      const itemPct =
+        it.progress.percent > 0
+          ? it.progress.percent
+          : it.comic.totalChapters > 0
+          ? Math.min(100, Math.round((curNum / it.comic.totalChapters) * 100))
+          : 0;
+      sumPct += itemPct;
+      if (it.comic.totalChapters > curNum) waiting++;
     }
     const avg = list.length ? Math.round(sumPct / list.length) : 0;
     const cont = list
@@ -242,9 +452,27 @@ export default function BookmarksView() {
 
   const openModal = (it: Item) => {
     setModalItem(it);
+    setSaveState("idle");
+    setSaveMessage("");
+    setErr("");
     const curNum = it.progress.current?.number ?? it.progress.readCount ?? 0;
     setModalChapNum(curNum > 0 ? curNum : 1);
+    const cached = chaptersCacheRef.current.get(it.comic.id);
+    if (cached) {
+      setModalChapters(cached);
+    } else {
+      setModalChapters([]);
+      void loadChaptersForComic(it.comic.id).then((list) => {
+        setModalChapters(list);
+      });
+    }
   };
+
+  const minModalChapterNum = modalChapters.length > 0 ? modalChapters[0].number : 1;
+  const maxModalChapterNum =
+    modalChapters.length > 0
+      ? modalChapters[modalChapters.length - 1].number
+      : modalItem?.comic.latestChapter?.number ?? modalItem?.comic.totalChapters ?? 1;
 
   const skeleton = useMemo(
     () => (
@@ -298,7 +526,7 @@ export default function BookmarksView() {
         </div>
       </section>
 
-      {/* 2. Continue Reading Collapsible Card Carousel (Matches 36691.jpg 1:1) */}
+      {/* 2. Continue Reading Collapsible Card Carousel */}
       {continueItems.length > 0 && (
         <section className="panel bm-cont-panel" data-layer="Continue Reading">
           <button
@@ -328,11 +556,9 @@ export default function BookmarksView() {
                 const c = it.comic;
                 const cur = it.progress.current!;
                 const pct =
-                  it.progress.percent > 0
-                    ? it.progress.percent
-                    : c.totalChapters > 0
+                  c.totalChapters > 0
                     ? Math.min(100, Math.round((cur.number / c.totalChapters) * 100))
-                    : 0;
+                    : it.progress.percent;
 
                 return (
                   <Link
@@ -373,7 +599,7 @@ export default function BookmarksView() {
         </section>
       )}
 
-      {/* 3. Library Filters + Poster Grid (Matches 36691.jpg 1:1) */}
+      {/* 3. Library Filters + Poster Grid */}
       <section className="panel" data-layer="Library Filters + Grid">
         <div className="browse-tools">
           <label className="s-search" htmlFor="bm-q">
@@ -449,7 +675,7 @@ export default function BookmarksView() {
           </label>
         </div>
 
-        {err && (
+        {err && !modalItem && (
           <p role="alert" className="mb-3 text-sm text-danger">
             {err}
           </p>
@@ -501,14 +727,17 @@ export default function BookmarksView() {
                 const dotColor = STATUS_DOT_COLOR[it.status] ?? "#a855f7";
 
                 return (
-                  <button
+                  <article
                     key={c.id}
-                    type="button"
                     className="bm-poster-card"
-                    style={busy === c.id ? { opacity: 0.6, pointerEvents: "none" } : undefined}
-                    onClick={() => openModal(it)}
+                    style={busy === c.id ? { opacity: 0.7 } : undefined}
                   >
-                    <span className="bm-poster-cov">
+                    <button
+                      type="button"
+                      className="bm-poster-cov"
+                      aria-label={`Manage bookmark for ${c.title}`}
+                      onClick={() => openModal(it)}
+                    >
                       <Cover
                         hue={hueOf(c.slug)}
                         title={c.title}
@@ -522,13 +751,17 @@ export default function BookmarksView() {
                       <span className="bm-frac-v2">
                         {readNum}/{c.totalChapters}
                       </span>
-                    </span>
-                    <span className="bm-poster-foot">
+                    </button>
+                    <Link
+                      href={`/comics/${c.slug}`}
+                      className="bm-poster-foot"
+                      aria-label={`Open ${c.title} detail page`}
+                    >
                       <span className="bm-poster-title" title={c.title}>
                         {c.title}
                       </span>
-                    </span>
-                  </button>
+                    </Link>
+                  </article>
                 );
               })}
             </div>
@@ -558,7 +791,7 @@ export default function BookmarksView() {
         )}
       </section>
 
-      {/* 4. Bookmark Detail Modal (Matches 36692.jpg 1:1) */}
+      {/* 4. Bookmark Detail Modal */}
       {modalItem && (
         <div
           className="bm-modal-overlay"
@@ -576,11 +809,48 @@ export default function BookmarksView() {
                 className="bmm-cov-v2 border-0 !p-1"
               />
               <div className="bmm-head-info">
-                <h3>{modalItem.comic.title}</h3>
+                <h3>
+                  <Link
+                    href={`/comics/${modalItem.comic.slug}`}
+                    onClick={() => setModalItem(null)}
+                    className="hover:text-primary"
+                  >
+                    {modalItem.comic.title}
+                  </Link>
+                </h3>
                 <span className="bdate">
                   Bookmarked {formatBookmarkedDate(modalItem.bookmarkedAt)}
                 </span>
-                <span className="bmm-type-v2">{formatTypeLabel(modalItem.comic.type)}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="bmm-type-v2">{formatTypeLabel(modalItem.comic.type)}</span>
+                  {saveState !== "idle" && (
+                    <span
+                      role="status"
+                      aria-live="polite"
+                      data-save-state={saveState}
+                      style={{
+                        fontSize: 11.5,
+                        fontWeight: 700,
+                        padding: "2px 9px",
+                        borderRadius: 6,
+                        background:
+                          saveState === "error"
+                            ? "rgba(248, 113, 113, 0.18)"
+                            : saveState === "saved"
+                            ? "rgba(52, 211, 153, 0.18)"
+                            : "rgba(168, 85, 247, 0.2)",
+                        color:
+                          saveState === "error"
+                            ? "#fca5a5"
+                            : saveState === "saved"
+                            ? "#6ee7b7"
+                            : "#d8b4fe",
+                      }}
+                    >
+                      {saveMessage}
+                    </span>
+                  )}
+                </div>
               </div>
               <button
                 type="button"
@@ -597,8 +867,8 @@ export default function BookmarksView() {
                 type="button"
                 className="bmm-circle-btn"
                 aria-label="Previous chapter"
-                disabled={modalChapNum <= 0}
-                onClick={() => setModalChapNum((n) => Math.max(0, n - 1))}
+                disabled={busy === modalItem.comic.id || modalChapNum <= minModalChapterNum || modalItem.comic.totalChapters <= 0}
+                onClick={() => void saveChapterSelection(modalItem, { type: "step", delta: -1 })}
               >
                 −
               </button>
@@ -609,10 +879,8 @@ export default function BookmarksView() {
                 type="button"
                 className="bmm-circle-btn"
                 aria-label="Next chapter"
-                disabled={modalChapNum >= modalItem.comic.totalChapters}
-                onClick={() =>
-                  setModalChapNum((n) => Math.min(modalItem.comic.totalChapters, n + 1))
-                }
+                disabled={busy === modalItem.comic.id || modalChapNum >= maxModalChapterNum || modalItem.comic.totalChapters <= 0}
+                onClick={() => void saveChapterSelection(modalItem, { type: "step", delta: 1 })}
               >
                 +
               </button>
@@ -621,9 +889,14 @@ export default function BookmarksView() {
             <button
               type="button"
               className="bmm-set-latest"
-              onClick={() => setModalChapNum(modalItem.comic.totalChapters)}
+              disabled={
+                busy === modalItem.comic.id ||
+                modalItem.comic.totalChapters <= 0 ||
+                modalChapNum >= maxModalChapterNum
+              }
+              onClick={() => void saveChapterSelection(modalItem, { type: "latest" })}
             >
-              Set to Chapter {modalItem.comic.totalChapters}
+              Set to Chapter {modalItem.comic.latestChapter?.displayNumber ?? modalItem.comic.totalChapters}
             </button>
 
             <div className="bmm-prog-v2">
@@ -652,6 +925,7 @@ export default function BookmarksView() {
               <select
                 className="bmm-status-select"
                 aria-label="Reading status"
+                disabled={busy === modalItem.comic.id}
                 value={modalItem.status}
                 onChange={(e) => {
                   const nextStatus = e.target.value as Status;

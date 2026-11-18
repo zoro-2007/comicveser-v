@@ -164,6 +164,7 @@ model Comic {
   coverKey         String?
   externalCoverUrl String?
   bannerKey        String?
+  providerRating   Float?
   views            Int              @default(0)
   chapters         Chapter[]
   genres           ComicGenre[]
@@ -581,27 +582,29 @@ model ExternalLibraryEntry {
 
 // A Comic can have a PRIMARY SourceTitle (e.g. ComicK) and CHAPTER_FALLBACK SourceTitles (WeebCentral, Asura Scans).
 model SourceTitle {
-  id           String           @id @default(cuid())
-  sourceId     String
-  externalId   String
-  title        String
-  sourceUrl    String
-  coverUrl     String?
-  contentType  String
-  state        SourceTitleState
-  role         SourceTitleRole  @default(PRIMARY)
-  comicId      String?
-  comic        Comic?           @relation(fields: [comicId], references: [id], onDelete: SetNull)
-  reviewedById String?
-  reviewedBy   User?            @relation("SourceTitleReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
-  reviewedAt   DateTime?
+  id             String           @id @default(cuid())
+  sourceId       String
+  externalId     String
+  title          String
+  sourceUrl      String
+  coverUrl       String?
+  contentType    String
+  providerRating Float?
+  genres         String[]         @default([])
+  state          SourceTitleState
+  role           SourceTitleRole  @default(PRIMARY)
+  comicId        String?
+  comic          Comic?           @relation(fields: [comicId], references: [id], onDelete: SetNull)
+  reviewedById   String?
+  reviewedBy     User?            @relation("SourceTitleReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt     DateTime?
   reviewNote     String?
   lastSyncedAt   DateTime?
   lastSyncStatus String?
   lastSyncError  String?
   chapters       SourceChapter[]
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 
   @@unique([sourceId, externalId])
   @@unique([comicId, sourceId])

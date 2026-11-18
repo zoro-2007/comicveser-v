@@ -71,7 +71,6 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         CREATE INDEX IF NOT EXISTS "Report_isRead_status_createdAt_idx" ON "Report"("isRead", "status", "createdAt");
       `);
 
-
       // Automatic chapter sync & notification metadata columns (additive, preserves all existing rows)
       await this.$executeRawUnsafe(`
         ALTER TABLE "SourceTitle" ADD COLUMN IF NOT EXISTS "lastSyncedAt" TIMESTAMP(3);
@@ -81,6 +80,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       `);
       await this.$executeRawUnsafe(`
         ALTER TABLE "SourceTitle" ADD COLUMN IF NOT EXISTS "lastSyncError" TEXT;
+      `);
+      await this.$executeRawUnsafe(`
+        ALTER TABLE "SourceTitle" ADD COLUMN IF NOT EXISTS "providerRating" DOUBLE PRECISION;
+      `);
+      await this.$executeRawUnsafe(`
+        ALTER TABLE "SourceTitle" ADD COLUMN IF NOT EXISTS "genres" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+      `);
+      await this.$executeRawUnsafe(`
+        ALTER TABLE "Comic" ADD COLUMN IF NOT EXISTS "providerRating" DOUBLE PRECISION;
       `);
       await this.$executeRawUnsafe(`
         ALTER TABLE "SourceChapter" ADD COLUMN IF NOT EXISTS "originalLabel" TEXT;
@@ -96,58 +104,22 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         WHERE "deletedAt" IS NOT NULL AND "publishState" <> 'ARCHIVED';
       `);
 
-      // Archive orphaned provider-imported comics whose SourceTitle rows were detached or deleted.
+      // Re-attach any approved SourceTitle rows whose comicId was accidentally left null
+      // by matching their normalized title to an active published Comic.
       await this.$executeRawUnsafe(`
-        UPDATE "Comic" c
-        SET "deletedAt" = COALESCE(c."deletedAt", NOW()),
-            "publishState" = 'ARCHIVED',
-            "slug" = CASE
-              WHEN c."slug" LIKE '%-deleted-%' THEN c."slug"
-              ELSE LEFT(c."slug", 160) || '-deleted-' || RIGHT(c."id", 8)
-            END
-        WHERE c."deletedAt" IS NULL
-          AND (
-            c."externalCoverUrl" IS NOT NULL
-            OR c."slug" ~ '-(comick|weebcentral|asurascans|mangadex)-'
-          )
+        UPDATE "SourceTitle" st
+        SET "comicId" = c."id"
+        FROM "Comic" c
+        WHERE st."comicId" IS NULL
+          AND st."state" = 'APPROVED'
+          AND c."deletedAt" IS NULL
+          AND c."publishState" = 'PUBLISHED'
+          AND REGEXP_REPLACE(REGEXP_REPLACE(LOWER(TRIM(st."title")), '^official\\s+', ''), '[^a-z0-9]+', '', 'g')
+            = REGEXP_REPLACE(REGEXP_REPLACE(LOWER(TRIM(c."title")), '^official\\s+', ''), '[^a-z0-9]+', '', 'g')
           AND NOT EXISTS (
-            SELECT 1 FROM "SourceTitle" st WHERE st."comicId" = c."id"
+            SELECT 1 FROM "SourceTitle" existing
+            WHERE existing."comicId" = c."id" AND existing."sourceId" = st."sourceId"
           );
-      `);
-
-      // Deduplicate multiple active comics sharing the same normalized title (including "Official " prefix),
-      // keeping only the newest active Comic row per title.
-      await this.$executeRawUnsafe(`
-        WITH ranked AS (
-          SELECT "id",
-                 ROW_NUMBER() OVER (
-                   PARTITION BY REGEXP_REPLACE(REGEXP_REPLACE(LOWER(TRIM("title")), '^official\\s+', ''), '[^a-z0-9]+', '', 'g')
-                   ORDER BY "createdAt" DESC, "updatedAt" DESC, "id" DESC
-                 ) AS rn
-          FROM "Comic"
-          WHERE "deletedAt" IS NULL
-        )
-        DELETE FROM "SourceTitle"
-        WHERE "comicId" IN (SELECT "id" FROM ranked WHERE rn > 1);
-      `);
-      await this.$executeRawUnsafe(`
-        WITH ranked AS (
-          SELECT "id",
-                 ROW_NUMBER() OVER (
-                   PARTITION BY REGEXP_REPLACE(REGEXP_REPLACE(LOWER(TRIM("title")), '^official\\s+', ''), '[^a-z0-9]+', '', 'g')
-                   ORDER BY "createdAt" DESC, "updatedAt" DESC, "id" DESC
-                 ) AS rn
-          FROM "Comic"
-          WHERE "deletedAt" IS NULL
-        )
-        UPDATE "Comic" c
-        SET "deletedAt" = NOW(),
-            "publishState" = 'ARCHIVED',
-            "slug" = CASE
-              WHEN c."slug" LIKE '%-deleted-%' THEN c."slug"
-              ELSE LEFT(c."slug", 160) || '-deleted-' || RIGHT(c."id", 8)
-            END
-        WHERE c."id" IN (SELECT "id" FROM ranked WHERE rn > 1);
       `);
     } catch {
       // Standard migration file is also present in prisma/migrations.
@@ -264,7 +236,6 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     }
   }
 }
-
 
 @Global()
 @Module({ providers: [PrismaService], exports: [PrismaService] })

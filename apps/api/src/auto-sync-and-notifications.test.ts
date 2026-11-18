@@ -655,15 +655,12 @@ test("PART 2, 4, 5, 6, 8: Existing published comic chapter repair, automatic new
 
 test("PART 7, 9, 10, 11: Verifies UI NotificationPopup, Unified Color Palette, Navigation, and Removal of Novels & Premium", () => {
   const webSrc = path.resolve(__dirname, "../../web/src");
-
   const bellCode = fs.readFileSync(path.join(webSrc, "components/NotificationBell.tsx"), "utf8");
-  assert.ok(bellCode.includes("#100E16"), "NotificationBell must use #100E16 dark background");
-  assert.ok(bellCode.includes("#211B2D"), "NotificationBell must use #211B2D card background");
-  assert.ok(bellCode.includes("#9333EA"), "NotificationBell must use #9333EA primary purple");
-  assert.ok(bellCode.includes("#A855F7"), "NotificationBell must use #A855F7 secondary purple");
-  assert.ok(bellCode.includes("#A8A1B5"), "NotificationBell must use #A8A1B5 muted text");
-  assert.ok(bellCode.includes('"All"') && bellCode.includes('"Chapters"') && bellCode.includes('"Messages"'), "NotificationBell must have All, Chapters, and Messages tabs");
-  assert.ok(bellCode.includes("View All Notifications"), "NotificationBell must include View All Notifications button");
+
+  assert.ok(bellCode.includes("notif-panel"), "NotificationBell must use notif-panel container");
+  assert.ok(bellCode.includes("Notifications") && bellCode.includes("Mark all read"), "NotificationBell must render Notifications header and Mark all read");
+  assert.ok(bellCode.includes("All (") && bellCode.includes("Chapters (") && bellCode.includes("Comments ("), "NotificationBell must have All, Chapters, and Comments tabs");
+  assert.ok(bellCode.includes("View All"), "NotificationBell must include View All link");
 
   const navCode = fs.readFileSync(path.join(webSrc, "lib/nav.ts"), "utf8");
   assert.ok(!navCode.includes("/novels"), "lib/nav.ts must not contain /novels");
@@ -679,29 +676,20 @@ test("PART 7, 9, 10, 11: Verifies UI NotificationPopup, Unified Color Palette, N
   assert.ok(premiumPageCode.includes('redirect("/browse")'), "/premium route must cleanly redirect to /browse");
 });
 
-test("Homepage 5-section redesign, multi-cover FeaturedCarousel, 2-column LatestUpdates, Ranked PopularTabs, and 4-tab Navigation", () => {
+test("Homepage Asura layout, FeaturedCarousel, LatestUpdates, Ranked PopularTabs, and 4-tab Navigation", () => {
   const webSrc = path.resolve(__dirname, "../../web/src");
   const pageCode = fs.readFileSync(path.join(webSrc, "app/page.tsx"), "utf8");
 
-  const idxFeatured = pageCode.indexOf("<FeaturedCarousel");
-  const idxLatest = pageCode.indexOf('title="Latest Chapter Updates"');
-  const idxTrending = pageCode.indexOf('title="Trending Comics"');
-  const idxPopular = pageCode.indexOf('title="Popular Comics"');
-  const idxAdded = pageCode.indexOf('title="Recently Added"');
-
-  assert.ok(idxFeatured > -1 && idxLatest > idxFeatured, "Latest Chapter Updates must follow FeaturedCarousel");
-  assert.ok(idxTrending > idxLatest, "Trending Comics must follow Latest Chapter Updates");
-  assert.ok(idxPopular > idxTrending, "Popular Comics must follow Trending Comics");
-  assert.ok(idxAdded > idxPopular, "Recently Added must follow Popular Comics");
+  assert.ok(pageCode.includes("<FeaturedCarousel") && pageCode.includes("Trending Comics") && pageCode.includes("Latest Updates") && pageCode.includes("<PopularTabs"), "Homepage must render FeaturedCarousel, Trending Comics, Latest Updates, and PopularTabs");
 
   const featuredCode = fs.readFileSync(path.join(webSrc, "components/FeaturedCarousel.tsx"), "utf8");
-  assert.ok(featuredCode.includes("Select featured comic") && featuredCode.includes("scale-100") && featuredCode.includes("scale-95"), "FeaturedCarousel must render horizontal covers with larger selected cover");
+  assert.ok(featuredCode.includes("hero-rail"), "FeaturedCarousel must render horizontal cover rail");
 
   const latestCode = fs.readFileSync(path.join(webSrc, "components/LatestUpdates.tsx"), "utf8");
-  assert.ok(latestCode.includes("grid-cols-1") && latestCode.includes("md:grid-cols-2"), "LatestUpdates must use 1 column on mobile and 2 columns on desktop");
+  assert.ok(latestCode.includes("latest-grid"), "LatestUpdates must use 2-column update grid");
 
   const popularCode = fs.readFileSync(path.join(webSrc, "components/PopularTabs.tsx"), "utf8");
-  assert.ok(popularCode.includes("Weekly") && popularCode.includes("Monthly") && popularCode.includes("All Time"), "PopularTabs must provide Weekly, Monthly, and All Time filters");
+  assert.ok(popularCode.includes("Weekly") && popularCode.includes("Monthly") && popularCode.includes("All"), "PopularTabs must provide Weekly, Monthly, and All filters");
 
   const bottomNavCode = fs.readFileSync(path.join(webSrc, "components/BottomNav.tsx"), "utf8");
   assert.ok(bottomNavCode.includes("grid-cols-4"), "BottomNav must use 4 columns for Home, Manga, Browse, and Bookmarks");

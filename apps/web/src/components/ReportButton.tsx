@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api } from "@/lib/api";
 
 const CATEGORIES = [
+  { value: "COMIC_REQUEST", label: "Request a Missing Comic" },
   { value: "BROKEN_CHAPTER", label: "Broken Chapter / Missing Pages" },
   { value: "CONTENT_ISSUE", label: "Wrong Title / Metadata Issue" },
   { value: "BUG", label: "Technical Bug" },
@@ -19,14 +20,16 @@ export default function ReportButton({
   chapterId,
   label = "Report issue",
 }: {
-  targetType?: "comic" | "chapter" | "review" | "comment" | "platform" | "account";
+  targetType?: "comic" | "chapter" | "review" | "comment" | "platform" | "account" | "comic_request";
   targetId?: string;
   comicId?: string;
   chapterId?: string;
   label?: string;
 }) {
   const defaultCategory =
-    targetType === "chapter"
+    targetType === "comic_request"
+      ? "COMIC_REQUEST"
+      : targetType === "chapter"
       ? "BROKEN_CHAPTER"
       : targetType === "comic"
       ? "CONTENT_ISSUE"
@@ -45,7 +48,7 @@ export default function ReportButton({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (description.trim().length < 3) {
-      setError("Please describe the issue (at least 3 characters).");
+      setError("Please describe the issue or comic request (at least 3 characters).");
       return;
     }
     setBusy(true);
@@ -54,7 +57,7 @@ export default function ReportButton({
       await api("/reports", {
         method: "POST",
         body: JSON.stringify({
-          targetType,
+          targetType: category === "COMIC_REQUEST" ? "comic_request" : targetType,
           targetId,
           category,
           subject: subject.trim() || `${category}: ${targetType} ${targetId}`,
@@ -76,7 +79,7 @@ export default function ReportButton({
   }
 
   if (sent) {
-    return <span className="text-xs font-medium text-emerald-400">Issue reported — Admin notified</span>;
+    return <span className="text-xs font-medium text-emerald-400">Submitted — Admin notified</span>;
   }
 
   return (
@@ -99,7 +102,7 @@ export default function ReportButton({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-fg">Report an Issue to Admin</h3>
+              <h3 className="text-base font-bold text-fg">Report an Issue / Request Comic</h3>
               <button
                 type="button"
                 onClick={() => setOpen(false)}
@@ -132,11 +135,11 @@ export default function ReportButton({
               </label>
 
               <label className="block space-y-1">
-                <span className="text-muted">Subject</span>
+                <span className="text-muted">{category === "COMIC_REQUEST" ? "Comic Title" : "Subject"}</span>
                 <input
                   type="text"
                   maxLength={200}
-                  placeholder="Short summary of the problem"
+                  placeholder={category === "COMIC_REQUEST" ? "Title of the comic you want added" : "Short summary of the problem"}
                   value={subject}
                   onChange={(e) => setSubject(e.target.value)}
                   className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-fg outline-none focus:border-primary"
@@ -149,7 +152,11 @@ export default function ReportButton({
                   required
                   rows={4}
                   maxLength={2000}
-                  placeholder="Describe what happened so our admins can fix it..."
+                  placeholder={
+                    category === "COMIC_REQUEST"
+                      ? "Share alternative title, type (Manhwa/Manga/Manhua), or source link..."
+                      : "Describe what happened so our admins can fix it..."
+                  }
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-fg outline-none focus:border-primary"
@@ -169,7 +176,7 @@ export default function ReportButton({
                   disabled={busy}
                   className="rounded-lg bg-primary px-4 py-2 font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
                 >
-                  {busy ? "Sending..." : "Submit Report"}
+                  {busy ? "Sending..." : "Submit"}
                 </button>
               </div>
             </form>

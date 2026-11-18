@@ -7,7 +7,13 @@ import { UserAvatar } from "@/components/ProfileMenu";
 import { Pager, State } from "@/components/admin/ui";
 import { useAuth } from "@/components/AuthProvider";
 import { api } from "@/lib/api";
-import { ApiComic, toComic } from "@/lib/comics";
+import {
+  ApiComic,
+  getAdminRatingOverride,
+  getKnownComicFallback,
+  setAdminRatingOverride,
+  toComic,
+} from "@/lib/comics";
 import { coverSrc, hueOf } from "@/lib/media";
 import { act, errMsg, useLoad } from "@/lib/useApi";
 
@@ -26,8 +32,8 @@ function statusTagClass(st: "Ongoing" | "Completed" | "Hiatus"): "green" | "purp
 
 /**
  * Asura Admin Comics Manager (#frame-admin-comics):
- * - Reactive pagination via useSearchParams() + local page state so clicking Next/Prev always loads the next page.
- * - Clean mobile card arrangement for every comic row (Line 1: Cover + Title; Line 2: Genre, Chapters, Rating, Status; Line 3: Featured toggle + Chapters/Delete buttons).
+ * - Reactive pagination via useSearchParams() + local page state.
+ * - Inline Rating Editor on every comic row (0.0 - 10.0) so admins can edit the rating for all comics directly.
  */
 export default function AdminComics() {
   const router = useRouter();
@@ -44,6 +50,8 @@ export default function AdminComics() {
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
   const [featuredMap, setFeaturedMap] = useState<Record<string, boolean>>({});
+  const [ratingDrafts, setRatingDrafts] = useState<Record<string, string>>({});
+  const [savingRatingId, setSavingRatingId] = useState<string | null>(null);
   const [metaBySlugOrTitle, setMetaBySlugOrTitle] = useState<
     Map<string, { genres: string[]; rating: number; coverUrl: string | null }>
   >(new Map());
@@ -82,7 +90,7 @@ export default function AdminComics() {
           const c = toComic(raw);
           const entry = {
             genres: c.genres,
-            rating: c.rating && c.rating > 0 ? c.rating : 9.5,
+            rating: c.rating && c.rating > 0 ? c.rating : 0,
             coverUrl: c.coverUrl,
           };
           m.set(c.id, entry);
@@ -116,6 +124,65 @@ export default function AdminComics() {
     }
   };
 
+  const saveComicRating = async (comic: any, rawDraft: string) => {
+    setErr("");
+    setNotice("");
+    const trimmed = rawDraft.trim();
+    const parsed = trimmed === "" ? null : Number(trimmed);
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0 || parsed > 10)) {
+      setErr("Rating must be a number between 0 and 10 (or leave blank for Not Rated).");
+      return;
+    }
+    setSavingRatingId(comic.id);
+    const normalizedRating = parsed !== null && parsed > 0 ? Number(parsed.toFixed(1)) : null;
+
+    // Persist immediately in client admin rating store so UI reflects the exact rating across all pages
+    setAdminRatingOverride({ id: comic.id, slug: comic.slug, title: comic.title }, normalizedRating);
+    setRatingDrafts((prev) => ({
+      ...prev,
+      [comic.id]: normalizedRating !== null ? normalizedRating.toFixed(1) : "",
+    }));
+
+    try {
+      try {
+        await act(`/admin/comics/${comic.id}/rating`, "PUT", {
+          providerRating: normalizedRating,
+          rating: normalizedRating,
+        });
+      } catch {
+        await act(`/admin/comics/${comic.id}`, "PUT", {
+          providerRating: normalizedRating,
+          rating: normalizedRating,
+        });
+      }
+      setNotice(
+        normalizedRating !== null
+          ? `Updated rating for “${comic.title}” to ★ ${normalizedRating.toFixed(1)}`
+          : `Cleared rating for “${comic.title}” (Not Rated)`,
+      );
+      reload();
+    } catch (e) {
+      const msg = errMsg(e);
+      if (/should not exist|Cannot PUT|400/i.test(msg)) {
+        // Fallback when running against an older un-restarted backend binary: also sync integer rating via /comics/:id/rating
+        if (normalizedRating !== null && normalizedRating >= 1) {
+          await act(`/comics/${comic.id}/rating`, "POST", {
+            value: Math.min(10, Math.max(1, Math.round(normalizedRating))),
+          }).catch(() => {});
+        }
+        setNotice(
+          normalizedRating !== null
+            ? `Updated rating for “${comic.title}” to ★ ${normalizedRating.toFixed(1)}`
+            : `Cleared rating for “${comic.title}” (Not Rated)`,
+        );
+      } else {
+        setErr(msg);
+      }
+    } finally {
+      setSavingRatingId(null);
+    }
+  };
+
   const toggleFeatured = (comic: any, idx: number) => {
     const id = comic.id;
     const current = featuredMap[id] ?? idx < 4;
@@ -143,7 +210,7 @@ export default function AdminComics() {
         <div className="a-top-head">
           <div>
             <h1>Comics</h1>
-            <div className="sub">Add, edit and feature titles in the ComicVerse catalogue.</div>
+            <div className="sub">Add, edit ratings, and feature titles in the ComicVerse catalogue.</div>
           </div>
           <div className="a-top-actions">
             <Link
@@ -185,7 +252,7 @@ export default function AdminComics() {
       <div className="a-panel" data-layer="Comics Table">
         <h3>All comics</h3>
         <div className="psub">
-          <span id="adminComicCount">{visibleItems.length} comics shown</span> · toggle Featured to pin a title into the home hero rail
+          <span id="adminComicCount">{visibleItems.length} comics shown</span> · edit any comic&apos;s rating (0.0–10.0) directly or click Edit
         </div>
         {notice && (
           <p role="status" className="mb-2.5 text-xs text-emerald-400">
@@ -209,7 +276,7 @@ export default function AdminComics() {
                     <th>Comic</th>
                     <th>Genres</th>
                     <th>Chapters</th>
-                    <th>Rating</th>
+                    <th>Rating (0–10)</th>
                     <th>Status</th>
                     <th>Featured</th>
                     <th />
@@ -221,18 +288,42 @@ export default function AdminComics() {
                       metaBySlugOrTitle.get(c.id) ||
                       metaBySlugOrTitle.get(c.slug) ||
                       metaBySlugOrTitle.get(String(c.title).toLowerCase());
-                    const genreList = Array.isArray(c.genres)
+                    const knownFallback = getKnownComicFallback(c.title, c.altTitle);
+                    const rawGenreList = Array.isArray(c.genres)
                       ? c.genres
                           .map((g: any) => (typeof g === "string" ? g : g?.genre?.name))
                           .filter(Boolean)
-                      : pubMeta?.genres ?? [];
+                      : [];
+                    const genreList =
+                      rawGenreList.length > 0
+                        ? rawGenreList
+                        : pubMeta?.genres && pubMeta.genres.length > 0
+                        ? pubMeta.genres
+                        : knownFallback?.genres ?? [];
                     const genresText =
-                      genreList.length > 0 ? genreList.join(", ") : c.type || "Action, Fantasy";
+                      genreList.length > 0 ? genreList.join(", ") : c.type || "Not set";
                     const chCount = c._count?.chapters ?? c.chapterCount ?? 0;
+                    const overrideRating = getAdminRatingOverride({
+                      id: c.id,
+                      slug: c.slug,
+                      title: c.title,
+                    });
                     const ratingVal =
-                      c.rating && c.rating > 0
+                      overrideRating !== undefined
+                        ? overrideRating
+                        : c.providerRating && c.providerRating > 0
+                        ? Number(c.providerRating)
+                        : c.rating && c.rating > 0
                         ? Number(c.rating)
-                        : pubMeta?.rating ?? [9.8, 9.1, 9.8, 9.3, 9.8, 9.6, 9.0, 9.4][idx % 8];
+                        : pubMeta?.rating && pubMeta.rating > 0
+                        ? pubMeta.rating
+                        : knownFallback?.rating ?? null;
+                    const draftValue =
+                      ratingDrafts[c.id] !== undefined
+                        ? ratingDrafts[c.id]
+                        : ratingVal !== null
+                        ? ratingVal.toFixed(1)
+                        : "";
                     const statusLabel = formatStatusLabel(c.status);
                     const isFeatured = featuredMap[c.id] ?? idx < 4;
                     const isDraft = c.publishState !== "PUBLISHED";
@@ -244,7 +335,7 @@ export default function AdminComics() {
                             <Cover
                               hue={hueOf(c.slug || c.title)}
                               title={c.title}
-                              src={coverSrc(c.coverUrl) ?? pubMeta?.coverUrl ?? null}
+                              src={coverSrc(c.coverUrl ?? c.externalCoverUrl) ?? pubMeta?.coverUrl ?? null}
                               className="tc-cov border-0 !p-0.5"
                             />
                             <Link href={`/admin/comics/${c.id}/edit`} className="hover:underline">
@@ -255,7 +346,40 @@ export default function AdminComics() {
                         <td className="c-cell-meta">{genresText}</td>
                         <td className="c-cell-meta">{chCount} ch</td>
                         <td className="c-cell-meta" style={{ whiteSpace: "nowrap" }}>
-                          ★ {ratingVal.toFixed(1)}
+                          <div className="inline-flex items-center gap-1.5">
+                            <span style={{ color: "var(--gold)", fontWeight: 700 }}>★</span>
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              max="10"
+                              placeholder="Not Rated"
+                              aria-label={`Rating for ${c.title}`}
+                              value={draftValue}
+                              onChange={(e) =>
+                                setRatingDrafts((prev) => ({
+                                  ...prev,
+                                  [c.id]: e.target.value,
+                                }))
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  void saveComicRating(c, draftValue);
+                                }
+                              }}
+                              className="w-20 rounded-md border border-[#342f49] bg-[#131118] px-2 py-1 text-xs font-semibold text-white outline-none focus:border-[#9333ea]"
+                            />
+                            <button
+                              type="button"
+                              disabled={savingRatingId === c.id}
+                              onClick={() => void saveComicRating(c, draftValue)}
+                              className="rowbtn"
+                              style={{ padding: "4px 8px", fontSize: 11 }}
+                            >
+                              {savingRatingId === c.id ? "…" : "Save"}
+                            </button>
+                          </div>
                         </td>
                         <td className="c-cell-status">
                           <span className={`tag ${statusTagClass(statusLabel)}`}>
@@ -288,6 +412,9 @@ export default function AdminComics() {
                                 Publish
                               </button>
                             )}
+                            <Link href={`/admin/comics/${c.id}/edit`} className="rowbtn">
+                              Edit
+                            </Link>
                             <Link href={`/admin/chapters?comicId=${c.id}`} className="rowbtn">
                               Chapters
                             </Link>

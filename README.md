@@ -5,7 +5,7 @@ ComicVerse is a production-ready reading and catalogue platform built with **Nes
 ---
 
 ## Key Features & Production Architecture
-
+    
 1. **Cross-Origin Production Authentication & Session Persistence**:
    - Supports both **HTTP-only cookies** (`cv_session`, automatically configured with `SameSite=None; Secure` on cross-site HTTPS deployments such as Render or Vercel) and **`Authorization: Bearer <token>`** fallback headers so sessions remain persistent across page reloads even under strict third-party cookie blocking.
    - Multi-origin CORS and CSRF `OriginGuard` via comma-separated `WEB_ORIGIN`.

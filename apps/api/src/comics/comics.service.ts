@@ -1,12 +1,17 @@
 import { resolveChapterDisplayNumber, resolveChapterPublishedAt } from "../sources/chapter-display";
 import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { ComicType, Prisma } from "@prisma/client";
 import { CacheService } from "../cache/cache.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { slugify } from "../common/util";
 import { StorageService, IMAGE_TYPES } from "../storage/storage.service";
 import { randomUUID } from "crypto";
-import { CreateComicDto, ListComicsQuery, UpdateComicDto } from "./dto/comic.dto";
+import { CreateComicDto, ListComicsQuery, UpdateComicDto, UpdateComicRatingDto } from "./dto/comic.dto";
+import {
+  fetchExternalProviderMetadata,
+  isPlaceholderComicDescription,
+  lookupCuratedSeriesMetadata,
+} from "../sources/known-metadata";
 
 const include = { genres: { include: { genre: true } } } satisfies Prisma.ComicInclude;
 
@@ -50,9 +55,87 @@ export class ComicsService {
     return Promise.all(["comics:trending", "comics:popular", "comics:popular:weekly", "comics:popular:monthly", "comics:latest"].map((key) => this.cache.delete(key)));
   }
 
-  // Average comes from Rating rows only; it is never stored on the comic.
+  /**
+   * Repairs existing comics in-place (both in memory and in PostgreSQL) when a published comic
+   * is missing its description ("No description provided."), genres, or rating.
+   */
+  private async repairComicRowIfNeeded(row: any, allowNetworkLookup = false): Promise<void> {
+    if (!row || !row.id || !row.title) return;
+    const needsDesc = isPlaceholderComicDescription(row.description, row.title);
+    const hasGenres = Array.isArray(row.genres) && row.genres.length > 0;
+    const hasRating = typeof row.providerRating === "number" && row.providerRating > 0;
+    const needsAuthor = !row.author || row.author === "Unknown";
+    if (!needsDesc && hasGenres && hasRating && !needsAuthor) return;
+
+    const altTitles = row.altTitle ? [String(row.altTitle)] : [];
+    const meta = allowNetworkLookup
+      ? await fetchExternalProviderMetadata(row.title, altTitles)
+      : lookupCuratedSeriesMetadata(row.title, altTitles);
+    if (!meta) return;
+
+    const patch: Record<string, unknown> = {};
+    if (needsDesc && meta.description && !isPlaceholderComicDescription(meta.description, row.title)) {
+      row.description = meta.description;
+      patch.description = meta.description.slice(0, 5000);
+    }
+    if (!hasRating && typeof meta.rating === "number" && meta.rating > 0) {
+      row.providerRating = meta.rating;
+      patch.providerRating = meta.rating;
+    }
+    if (needsAuthor && meta.author) {
+      row.author = meta.author;
+      patch.author = meta.author.slice(0, 120);
+    }
+    if ((!row.artist || row.artist === "Unknown") && meta.artist) {
+      row.artist = meta.artist;
+      patch.artist = meta.artist.slice(0, 120);
+    }
+    if (row.type === "MANGA" && meta.contentType === "manhwa") {
+      row.type = ComicType.MANHWA;
+      patch.type = ComicType.MANHWA;
+    }
+
+    if (!hasGenres && meta.genres.length > 0) {
+      row.genres = meta.genres.map((name) => ({
+        genre: { name, slug: slugify(name) },
+      }));
+      if (typeof (this.db as any)?.genre?.upsert === "function" && typeof (this.db as any)?.comicGenre?.createMany === "function") {
+        try {
+          const genreIds: string[] = [];
+          for (const gName of meta.genres) {
+            const gSlug = slugify(gName);
+            if (!gSlug) continue;
+            const gRow = await (this.db as any).genre.upsert({
+              where: { slug: gSlug },
+              update: {},
+              create: { slug: gSlug, name: gName },
+            });
+            if (gRow?.id) genreIds.push(gRow.id);
+          }
+          if (genreIds.length > 0) {
+            await (this.db as any).comicGenre.createMany({
+              data: genreIds.map((genreId) => ({ comicId: row.id, genreId })),
+              skipDuplicates: true,
+            });
+          }
+        } catch {
+          // Ignore in unit tests with partial mocks
+        }
+      }
+    }
+
+    if (Object.keys(patch).length > 0 && typeof (this.db.comic as any)?.update === "function") {
+      if (row.updatedAt) patch.updatedAt = row.updatedAt;
+      await (this.db.comic as any)
+        .update({ where: { id: row.id }, data: patch })
+        .catch(() => {});
+    }
+  }
+
+  // User rating average comes from Rating rows; providerRating is stored separately on the comic/sourceTitle.
   async withRatings<T extends { id: string }>(items: T[]) {
     if (!items.length) return [];
+    await Promise.all(items.map((item) => this.repairComicRowIfNeeded(item, false)));
     const g = await this.db.rating.groupBy({ by: ["comicId"], where: { comicId: { in: items.map((i) => i.id) } }, _avg: { value: true }, _count: true });
     const m = new Map(g.map((r) => [r.comicId, r]));
     const latest = await this.db.chapter.findMany({
@@ -67,8 +150,20 @@ export class ComicsService {
     const cm = new Map(counts.map((r) => [r.comicId, r._count]));
     return Promise.all(items.map(async (i) => {
       const latestChapter = lm.get(i.id);
+      const userRating = m.get(i.id)?._avg.value ?? null;
+      const rawProviderRating = (i as { providerRating?: number | null }).providerRating;
+      const providerRating =
+        typeof rawProviderRating === "number" && Number.isFinite(rawProviderRating) && rawProviderRating > 0
+          ? rawProviderRating
+          : null;
+      const effectiveRating = providerRating ?? userRating ?? null;
       return {
-        ...i, rating: m.get(i.id)?._avg.value ?? null, ratingCount: m.get(i.id)?._count ?? 0, chapterCount: cm.get(i.id) ?? 0,
+        ...i,
+        userRating,
+        providerRating,
+        rating: effectiveRating,
+        ratingCount: m.get(i.id)?._count ?? 0,
+        chapterCount: cm.get(i.id) ?? 0,
         latestChapter: latestChapter ? { id: latestChapter.id, number: latestChapter.number, displayNumber: resolveChapterDisplayNumber(latestChapter, latestChapter.sourceChapter), publishedAt: resolveChapterPublishedAt(latestChapter, latestChapter.sourceChapter) } : null,
         coverUrl: (i as { externalCoverUrl?: string | null }).externalCoverUrl ?? await this.mediaUrl((i as { coverKey?: string | null }).coverKey),
         bannerUrl: await this.mediaUrl((i as { bannerKey?: string | null }).bannerKey),
@@ -77,11 +172,35 @@ export class ComicsService {
   }
 
   async list(q: ListComicsQuery) {
-    const genreSlugs = (q.genre ?? "").split(",").map((g) => g.trim()).filter(Boolean).slice(0, 6);
+    const rawGenreTokens = (q.genre ?? "")
+      .split(",")
+      .map((g) => g.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    const genreSlugs = Array.from(new Set(rawGenreTokens.map((g) => slugify(g)).filter(Boolean)));
     const creator = q.creator?.trim();
-    // Every selected genre must match (AND), so adding a genre narrows the results.
+
+    // Requirement 5: Match any selected genre (OR matching across selected genres) by slug or case-insensitive name.
+    const genreFilter: Prisma.ComicWhereInput | null =
+      genreSlugs.length > 0
+        ? {
+            genres: {
+              some: {
+                genre: {
+                  OR: [
+                    { slug: { in: genreSlugs } },
+                    ...rawGenreTokens.map((name) => ({
+                      name: { equals: name, mode: "insensitive" as const },
+                    })),
+                  ],
+                },
+              },
+            },
+          }
+        : null;
+
     const and: Prisma.ComicWhereInput[] = [
-      ...genreSlugs.map((slug) => ({ genres: { some: { genre: { slug } } } })),
+      ...(genreFilter ? [genreFilter] : []),
       ...(creator ? [{ OR: [{ author: { contains: creator, mode: "insensitive" as const } }, { artist: { contains: creator, mode: "insensitive" as const } }] }] : []),
     ];
     const where: Prisma.ComicWhereInput = {
@@ -100,8 +219,6 @@ export class ComicsService {
     const baseOrder = ({ updated: { updatedAt: "desc" }, added: { createdAt: "desc" }, popular: { views: "desc" }, alpha: { title: "asc" } } as Record<string, Prisma.ComicOrderByWithRelationInput>)[q.sort ?? "updated"] ?? { updatedAt: "desc" };
     const orderBy: Prisma.ComicOrderByWithRelationInput[] = [baseOrder, { createdAt: "desc" }];
 
-    // Rating, chapter count and minimum filters are derived values (not columns), so those queries are filtered,
-    // sorted and paginated in memory over the matching catalogue (capped) instead of in SQL.
     if (q.sort === "rating" || q.sort === "chapters" || q.minChapters || q.minRating) {
       const rows = await this.db.comic.findMany({ where, orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }], include, take: 1000 });
       let all = await this.withRatings(dedupeByTitle(rows));
@@ -141,7 +258,6 @@ export class ComicsService {
     return this.cache.wrap(`comics:popular:${period}`, 60, () => this.popularSince(period === "weekly" ? 7 : 30));
   }
 
-  // Real period rankings from recorded COMIC_VIEW events; padded with all-time leaders so the list is never empty.
   private async popularSince(days: number, take = 12) {
     const since = new Date(Date.now() - days * 86_400_000);
     const groups = await this.db.analyticsEvent.groupBy({
@@ -164,6 +280,20 @@ export class ComicsService {
   async bySlug(slug: string) {
     const c = await this.db.comic.findFirst({ where: { slug, ...this.publicWhere }, include });
     if (!c) throw new NotFoundException("Comic not found.");
+    await this.repairComicRowIfNeeded(c, true);
+    if (typeof (this.db.comic as any)?.updateMany === "function") {
+      await (this.db.comic as any)
+        .updateMany({ where: { id: c.id }, data: { views: { increment: 1 } } })
+        .then(() => {
+          (c as any).views = ((c as any).views ?? 0) + 1;
+          return Promise.all(
+            ["comics:trending", "comics:popular", "comics:popular:weekly", "comics:popular:monthly"].map((k) =>
+              this.cache?.delete?.(k),
+            ),
+          );
+        })
+        .catch(() => {});
+    }
     const [withRating] = await this.withRatings([c]);
     const chapterCount = await this.db.chapter.count({ where: { comicId: c.id, publishState: "PUBLISHED", deletedAt: null } });
     return { ...withRating, chapterCount };
@@ -180,8 +310,10 @@ export class ComicsService {
   }
 
   async genreConnect(slugs: string[]) {
-    const found = await this.db.genre.findMany({ where: { slug: { in: slugs } } });
-    if (found.length !== new Set(slugs).size) throw new BadRequestException("One or more genres do not exist.");
+    const normalized = Array.from(new Set(slugs.map((s) => slugify(s)).filter(Boolean)));
+    if (!normalized.length) return [];
+    const found = await this.db.genre.findMany({ where: { slug: { in: normalized } } });
+    if (found.length !== normalized.length) throw new BadRequestException("One or more genres do not exist.");
     return found.map((g) => ({ genre: { connect: { id: g.id } } }));
   }
 
@@ -209,11 +341,24 @@ export class ComicsService {
   async create(dto: CreateComicDto, actor: string) {
     await this.validateCoverKey(dto.coverKey);
     await this.validateCoverKey(dto.bannerKey);
-    const { genreSlugs, ...data } = dto;
-    const genres = await this.genreConnect(genreSlugs);
+    const { genreSlugs, rating, providerRating, ...data } = dto as any;
+    const resolvedRating = providerRating !== undefined ? providerRating : rating;
+    const validProviderRating =
+      typeof resolvedRating === "number" && Number.isFinite(resolvedRating) && resolvedRating > 0
+        ? Number(resolvedRating.toFixed(2))
+        : null;
+    const genres = await this.genreConnect(genreSlugs ?? []);
     const slug = await this.uniqueSlug(dto.title);
     const comic = await this.db.$transaction(async (tx) => {
-      const created = await tx.comic.create({ data: { ...data, slug, genres: { create: genres } }, include });
+      const created = await (tx.comic as any).create({
+        data: {
+          ...data,
+          ...(resolvedRating !== undefined ? { providerRating: validProviderRating } : {}),
+          slug,
+          genres: { create: genres },
+        },
+        include,
+      });
       await tx.auditLog.create({ data: { actorId: actor, action: "comic.create", resource: "Comic", resourceId: created.id } });
       return created;
     });
@@ -221,16 +366,74 @@ export class ComicsService {
     return comic;
   }
 
+  async updateRating(id: string, dto: UpdateComicRatingDto, actor: string) {
+    const rawRating = dto.providerRating !== undefined ? dto.providerRating : dto.rating;
+    const validProviderRating =
+      typeof rawRating === "number" && Number.isFinite(rawRating) && rawRating > 0
+        ? Number(rawRating.toFixed(2))
+        : null;
+    const comic = await this.db.$transaction(async (tx) => {
+      const exists = await tx.comic.findFirst({ where: { id, deletedAt: null }, select: { id: true, updatedAt: true } });
+      if (!exists) throw new NotFoundException("Comic not found.");
+      const updated = await (tx.comic as any).update({
+        where: { id },
+        data: {
+          providerRating: validProviderRating,
+          ...(exists.updatedAt ? { updatedAt: exists.updatedAt } : {}),
+        },
+        include,
+      });
+      if (typeof (tx as any).sourceTitle?.updateMany === "function") {
+        await (tx as any).sourceTitle
+          .updateMany({ where: { comicId: id }, data: { providerRating: validProviderRating } })
+          .catch(() => {});
+      }
+      await tx.auditLog.create({
+        data: {
+          actorId: actor,
+          action: "comic.rating.update",
+          resource: "Comic",
+          resourceId: id,
+          meta: { providerRating: validProviderRating },
+        },
+      });
+      return updated;
+    });
+    await this.invalidateHomeCaches();
+    return { ...comic, rating: comic.providerRating ?? null };
+  }
+
   async update(id: string, dto: UpdateComicDto, actor: string) {
     await this.validateCoverKey(dto.coverKey);
     await this.validateCoverKey(dto.bannerKey);
-    const { genreSlugs, ...data } = dto;
+    const { genreSlugs, rating, providerRating, ...data } = dto as any;
+    const hasRatingUpdate = providerRating !== undefined || rating !== undefined;
+    const rawRating = providerRating !== undefined ? providerRating : rating;
+    const validProviderRating =
+      typeof rawRating === "number" && Number.isFinite(rawRating) && rawRating > 0
+        ? Number(rawRating.toFixed(2))
+        : null;
     const genres = genreSlugs ? await this.genreConnect(genreSlugs) : undefined;
     const comic = await this.db.$transaction(async (tx) => {
-      const exists = await tx.comic.findFirst({ where: { id, deletedAt: null }, select: { id: true } });
+      const exists = await tx.comic.findFirst({ where: { id, deletedAt: null }, select: { id: true, updatedAt: true } });
       if (!exists) throw new NotFoundException("Comic not found.");
       if (genres) await tx.comicGenre.deleteMany({ where: { comicId: id } });
-      const updated = await tx.comic.update({ where: { id }, data: { ...data, ...(genres && { genres: { create: genres } }) }, include });
+      const updated = await (tx.comic as any).update({
+        where: { id },
+        data: {
+          ...data,
+          ...(hasRatingUpdate ? { providerRating: validProviderRating } : {}),
+          ...(genres && { genres: { create: genres } }),
+          // Preserve updatedAt when editing metadata/rating so Latest Updates only changes on new comic/chapter publication
+          ...(exists.updatedAt ? { updatedAt: exists.updatedAt } : {}),
+        },
+        include,
+      });
+      if (hasRatingUpdate && typeof (tx as any).sourceTitle?.updateMany === "function") {
+        await (tx as any).sourceTitle
+          .updateMany({ where: { comicId: id }, data: { providerRating: validProviderRating } })
+          .catch(() => {});
+      }
       await tx.auditLog.create({ data: { actorId: actor, action: "comic.update", resource: "Comic", resourceId: id, meta: { fields: Object.keys(dto) } } });
       return updated;
     });

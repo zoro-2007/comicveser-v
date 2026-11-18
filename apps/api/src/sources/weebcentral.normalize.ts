@@ -9,6 +9,7 @@ import type {
   SearchResponse,
 } from "./provider.interface";
 import { elements, htmlText, metaContent, voidElements } from "./html";
+import { lookupCuratedSeriesMetadata } from "./known-metadata";
 
 const SITE = "https://weebcentral.com";
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
@@ -51,8 +52,16 @@ function normalizedContentType(value: string): "manga" | "manhwa" | "manhua" | "
 }
 
 function contentTypeFrom(markup: string): "manga" | "manhwa" | "manhua" | "unknown" {
-  const typeLabel = markup.match(/<strong[^>]*>\s*type\s*<\/strong>\s*<span[^>]*>([\s\S]*?)<\/span>/i)?.[1];
-  if (typeLabel) return normalizedContentType(htmlText(typeLabel));
+  const incType = markup.match(/[?&]included_type=([^&#"'\s>]+)/i)?.[1];
+  if (incType) {
+    const p = normalizedContentType(incType);
+    if (p !== "unknown") return p;
+  }
+  const typeLabel = markup.match(/<strong[^>]*>\s*type\s*:?\s*<\/strong>\s*(?:<[^>]+>\s*)*([^<]+)/i)?.[1];
+  if (typeLabel) {
+    const p = normalizedContentType(htmlText(typeLabel));
+    if (p !== "unknown") return p;
+  }
   const typedElement = [...elements(markup, "span"), ...elements(markup, "div"), ...elements(markup, "p")].find(
     (element) => /type/i.test(element.attrs.class ?? ""),
   );
@@ -65,6 +74,191 @@ function contentTypeFrom(markup: string): "manga" | "manhwa" | "manhua" | "unkno
   return normalizedContentType(labelled ?? "");
 }
 
+function cleanGenreToken(raw: string): string | null {
+  const cleaned = htmlText(raw).replace(/^[,·•|-]+|[,·•|-]+$/g, "").replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > 50 || /^\d+$/.test(cleaned)) return null;
+  if (/^(?:tags?\(?s?\)?|genres?\(?s?\)?|type|status|author|artist|released|year|more|search|browse|all|none|n\/a)$/i.test(cleaned)) {
+    return null;
+  }
+  return cleaned;
+}
+
+export function extractWeebCentralGenres(markup: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (raw: string | null | undefined) => {
+    if (!raw) return;
+    for (const part of raw.split(/[,;•·|/]+/)) {
+      const g = cleanGenreToken(part);
+      if (!g) continue;
+      const key = g.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(g);
+    }
+  };
+
+  // 1. Links to included_tag / genre / tag routes (both anchor text and URL query value)
+  for (const anchor of elements(markup, "a")) {
+    const href = anchor.attrs.href ?? "";
+    if (/included_tag=/i.test(href) || /[?&](?:genre|tag)s?=/i.test(href) || /\/(?:genres?|tags?)\//i.test(href)) {
+      add(anchor.innerHtml);
+      const qMatch = href.match(/(?:included_tag|genres?|tags?)=([^&#"\s]+)/i);
+      if (qMatch?.[1]) {
+        try {
+          add(decodeURIComponent(qMatch[1].replace(/\+/g, " ")));
+        } catch {
+          add(qMatch[1].replace(/\+/g, " "));
+        }
+      }
+    }
+  }
+
+  // Also scan raw included_tag= occurrences in markup in case of nested tags inside <a>
+  for (const m of markup.matchAll(/[?&]included_tag=([^&#"'\s>]+)/gi)) {
+    if (m[1]) {
+      try {
+        add(decodeURIComponent(m[1].replace(/\+/g, " ")));
+      } catch {
+        add(m[1].replace(/\+/g, " "));
+      }
+    }
+  }
+
+  // 2. Any <strong>Tags(s):</strong> / <strong>Genres:</strong> / <strong>Categories:</strong> section regardless of wrapper tag
+  const strongTagRegex =
+    /<strong[^>]*>\s*(?:tags?(?:\(s\))?|genres?(?:\(s\))?|categor(?:y|ies))\s*:?\s*<\/strong>\s*([\s\S]*?)(?=<strong\b|<\/li>|<\/div>|<\/p>|<\/section>|<\/article>|$)/gi;
+  for (const match of markup.matchAll(strongTagRegex)) {
+    const body = match[1] ?? "";
+    const links = elements(body, "a");
+    if (links.length > 0) {
+      for (const link of links) add(link.innerHtml);
+    } else {
+      const spans = elements(body, "span");
+      if (spans.length > 0) {
+        for (const s of spans) add(s.innerHtml);
+      } else {
+        add(body);
+      }
+    }
+  }
+
+  // 3. data-tags / data-genres attributes
+  for (const m of markup.matchAll(/\bdata-(?:tags|genres)\s*=\s*["']([^"']+)["']/gi)) {
+    add(m[1]);
+  }
+
+  // 4. JSON-LD genre array or string
+  for (const scriptMatch of markup.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const parsed = JSON.parse(scriptMatch[1].trim()) as { genre?: unknown };
+      if (Array.isArray(parsed.genre)) {
+        for (const g of parsed.genre) if (typeof g === "string") add(g);
+      } else if (typeof parsed.genre === "string") {
+        add(parsed.genre);
+      }
+    } catch {
+      // ignore invalid JSON-LD
+    }
+  }
+
+  return out;
+}
+
+export function extractWeebCentralRating(markup: string): number | null {
+  // 1. JSON-LD aggregateRating
+  for (const scriptMatch of markup.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const parsed = JSON.parse(scriptMatch[1].trim()) as {
+        aggregateRating?: { ratingValue?: unknown; bestRating?: unknown };
+      };
+      const rawVal = parsed?.aggregateRating?.ratingValue;
+      const numVal = typeof rawVal === "number" ? rawVal : typeof rawVal === "string" ? Number.parseFloat(rawVal) : Number.NaN;
+      if (Number.isFinite(numVal) && numVal > 0) {
+        if (numVal <= 10) return Number(numVal.toFixed(2));
+        if (numVal <= 100) return Number((numVal / 10).toFixed(2));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. Explicit data-rating or labelled Rating/Score block
+  const patterns = [
+    /\bdata-(?:rating|score)\s*=\s*["'](\d+(?:\.\d+)?)["']/i,
+    /<strong[^>]*>\s*(?:rating|score|user\s*rating)\s*:?\s*<\/strong>\s*(?:<[^>]+>\s*)*(\d+(?:\.\d+)?)(?:\s*\/\s*10)?/i,
+    /\bitemprop\s*=\s*["']ratingValue["'][^>]*>\s*(\d+(?:\.\d+)?)\s*</i,
+    /(?:★|⭐)\s*(\d\.\d{1,2})\b/i,
+  ];
+  for (const pat of patterns) {
+    const m = markup.match(pat);
+    if (m?.[1]) {
+      const val = Number.parseFloat(m[1]);
+      if (Number.isFinite(val) && val > 0 && val <= 10) return Number(val.toFixed(2));
+    }
+  }
+
+  return null;
+}
+
+function extractLabelledValues(markup: string, labelPattern: string): string[] {
+  const regex = new RegExp(
+    `<strong[^>]*>\\s*(?:${labelPattern})\\s*:?\\s*<\\/strong>\\s*([\\s\\S]*?)(?=<strong\\b|<\\/li>|<\\/div>|<\\/p>|<\\/section>|<\\/body>|$)`,
+    "gi",
+  );
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (val: string) => {
+    const clean = htmlText(val).replace(/\s+/g, " ").trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(clean);
+  };
+  for (const m of markup.matchAll(regex)) {
+    const body = m[1] ?? "";
+    const anchors = elements(body, "a");
+    if (anchors.length > 0) {
+      for (const a of anchors) push(a.innerHtml);
+    } else {
+      const lis = elements(body, "li");
+      if (lis.length > 0) {
+        for (const li of lis) push(li.innerHtml);
+      } else {
+        for (const part of htmlText(body).split(/[,;|]+/)) push(part);
+      }
+    }
+  }
+  return out;
+}
+
+function extractStatusFromMarkup(markup: string): string | null {
+  const values = extractLabelledValues(markup, "status");
+  const first = values[0]?.toLowerCase() ?? "";
+  if (/\bcompleted?\b/.test(first)) return "completed";
+  if (/\bhiatus\b/.test(first)) return "hiatus";
+  if (/\bongoing\b/.test(first)) return "ongoing";
+  if (/\bcancelled|canceled\b/.test(first)) return "cancelled";
+  const statusLink = markup.match(/[?&]included_status=([^&#"'\s>]+)/i)?.[1]?.toLowerCase() ?? "";
+  if (/complete/.test(statusLink)) return "completed";
+  if (/hiatus/.test(statusLink)) return "hiatus";
+  if (/ongoing/.test(statusLink)) return "ongoing";
+  return null;
+}
+
+function extractYearFromMarkup(markup: string): number | null {
+  const values = extractLabelledValues(markup, "released|release\\s*year|year");
+  for (const v of values) {
+    const m = v.match(/\b(19\d{2}|20\d{2})\b/);
+    if (m?.[1]) {
+      const yr = Number.parseInt(m[1], 10);
+      if (yr >= 1900 && yr <= 2100) return yr;
+    }
+  }
+  return null;
+}
+
 function summaryFromLink(href: string, title: string, html: string, cardType?: string): MangaSummary | null {
   const id = sourceIdFromUrl(href);
   const sourceUrl = safeUrl(href, SITE);
@@ -73,28 +267,76 @@ function summaryFromLink(href: string, title: string, html: string, cardType?: s
   const rawTitle = htmlText(title) || htmlText(image?.alt ?? "");
   const resolvedTitle = rawTitle.replace(/^Official\s+/i, "").trim() || rawTitle;
   if (!resolvedTitle) return null;
+  const alternativeTitles = extractLabelledValues(
+    html,
+    "associated\\s*names?|alternative\\s*titles?|alt\\s*titles?",
+  ).filter((t) => t.toLowerCase() !== resolvedTitle.toLowerCase());
+  const curated = lookupCuratedSeriesMetadata(resolvedTitle, alternativeTitles);
   const type =
     normalizedContentType(cardType ?? "") !== "unknown"
       ? normalizedContentType(cardType ?? "")
-      : contentTypeFrom(html);
+      : contentTypeFrom(html) !== "unknown"
+      ? contentTypeFrom(html)
+      : curated?.contentType ?? "unknown";
+  const extractedGenres = extractWeebCentralGenres(html);
+  const genres = extractedGenres.length > 0 ? extractedGenres : curated?.genres ?? [];
+  const rating = extractWeebCentralRating(html) ?? curated?.rating ?? null;
+  const status = extractStatusFromMarkup(html) ?? curated?.status ?? null;
+  const description = extractWeebCentralDescription(html, resolvedTitle) ?? curated?.description ?? null;
   return {
     id,
     externalId: id,
     sourceId: "weebcentral",
     title: resolvedTitle,
-    alternativeTitles: [],
+    alternativeTitles,
     coverUrl: coverFrom(html),
-    description: null,
-    status: null,
-    genres: [],
+    description,
+    status,
+    genres,
     contentType: type,
     language: "en",
     sourceUrl,
+    rating,
   };
 }
 
 function seriesAnchor(markup: string) {
   return elements(markup, "a").find((anchor) => !!anchor.attrs.href && !!sourceIdFromUrl(anchor.attrs.href)) ?? null;
+}
+
+/**
+ * Extracts balanced outer <article> blocks so nested <article> tags inside WeebCentral
+ * /search/data cards do not truncate the metadata section (Tags(s), Status, Year, Author).
+ */
+function extractBalancedArticles(html: string): Array<{ attrs: Record<string, string>; innerHtml: string }> {
+  const results: Array<{ attrs: Record<string, string>; innerHtml: string }> = [];
+  const tokenRegex = /<(\/?)article\b([^>]*)>/gi;
+  let depth = 0;
+  let openEnd = -1;
+  let openTag = "";
+  for (const m of html.matchAll(tokenRegex)) {
+    const isClose = m[1] === "/";
+    const idx = m.index ?? 0;
+    if (!isClose) {
+      if (depth === 0) {
+        openTag = m[0];
+        openEnd = idx + m[0].length;
+      }
+      depth++;
+    } else if (depth > 0) {
+      depth--;
+      if (depth === 0 && openEnd !== -1) {
+        const innerHtml = html.slice(openEnd, idx);
+        const attrMatch = openTag.match(/data-(?:tip|tooltip)\s*=\s*["']([^"']+)["']/i);
+        results.push({
+          attrs: attrMatch ? { "data-tip": attrMatch[1] } : {},
+          innerHtml,
+        });
+        openEnd = -1;
+      }
+    }
+  }
+  return results;
 }
 
 export function normalizeSearch(html: string, query: SearchQuery): SearchResponse {
@@ -118,7 +360,8 @@ export function normalizeSearch(html: string, query: SearchQuery): SearchRespons
       if (anchor.attrs.href) add(anchor.attrs.href, htmlText(anchor.innerHtml), anchor.innerHtml);
     }
   } else {
-    const cards = [...elements(html, "li"), ...elements(html, "article")];
+    const balancedArticles = extractBalancedArticles(html);
+    const cards = [...elements(html, "li"), ...balancedArticles, ...elements(html, "article")];
     for (const card of cards) {
       const anchor = seriesAnchor(card.innerHtml);
       if (!anchor?.attrs.href) continue;
@@ -179,30 +422,137 @@ function detailsTitle(html: string): string | null {
   );
 }
 
+export function extractWeebCentralDescription(markup: string, title?: string): string | null {
+  const sanitizeSynopsis = (raw: string): string => {
+    let cleaned = raw
+      .replace(/^read\s+[^\n.!?]{1,120}\s+online\s+for\s+free(?:\s+on\s+weeb\s*central)?[.:!\s-]*/i, "")
+      .replace(/^(?:description|synopsis|summary)\s*:?\s*/i, "")
+      .trim();
+    if (/^weeb\s*central\s+is\s+a\b/i.test(cleaned)) return "";
+    return cleaned;
+  };
+
+  const isBoilerplate = (txt: string) => {
+    const clean = sanitizeSynopsis(txt);
+    if (!clean || clean.length < 10) return true;
+    if (/^read\s+.+\s+online\s+for\s+free/i.test(clean)) return true;
+    if (/^weeb\s*central\s+is\s+a/i.test(clean)) return true;
+    if (/^(?:no\s+description|n\/a|none|tbd|unknown)/i.test(clean)) return true;
+    if (title && clean.toLowerCase() === title.toLowerCase()) return true;
+    return false;
+  };
+
+  // 1. Check <li> elements that start with or contain a Description/Synopsis/Summary label
+  for (const li of elements(markup, "li")) {
+    if (/<(?:strong|h[2-5]|span)[^>]*>\s*(?:description|synopsis|summary)\s*:?\s*<\/(?:strong|h[2-5]|span)>/i.test(li.innerHtml)) {
+      const withoutLabel = li.innerHtml.replace(
+        /<(?:strong|h[2-5]|span)[^>]*>\s*(?:description|synopsis|summary)\s*:?\s*<\/(?:strong|h[2-5]|span)>/i,
+        "",
+      );
+      const paragraphs = elements(withoutLabel, "p");
+      const rawText =
+        paragraphs.length > 0
+          ? paragraphs.map((p) => htmlText(p.innerHtml)).filter(Boolean).join("\n\n")
+          : htmlText(withoutLabel);
+      const clean = sanitizeSynopsis(rawText);
+      if (clean && !isBoilerplate(clean)) return clean;
+    }
+  }
+
+  // 2. Explicit <strong>Description</strong> or <h2>/<h3>Description block in HTML body (without stopping on inner <strong> tags!)
+  const descBlockRegex =
+    /<(?:strong|h[2-5])[^>]*>\s*(?:description|synopsis|summary)\s*:?\s*<\/(?:strong|h[2-5])>\s*([\s\S]*?)(?=<\/li>|<\/section>|<\/ul>|<\/article>|<strong[^>]*>\s*(?:tags?(?:\(s\))?|genres?(?:\(s\))?|status|type|authors?(?:\(s\))?|artists?(?:\(s\))?|released|year|associated\s*names?|alternative\s*titles?|official\s*translation|track|rss)\b|$)/gi;
+  for (const m of markup.matchAll(descBlockRegex)) {
+    const rawBody = m[1] ?? "";
+    const paragraphs = elements(rawBody, "p");
+    const text =
+      paragraphs.length > 0
+        ? paragraphs.map((p) => htmlText(p.innerHtml)).filter(Boolean).join("\n\n")
+        : htmlText(rawBody);
+    const clean = sanitizeSynopsis(text);
+    if (clean && !isBoilerplate(clean)) return clean;
+  }
+
+  // 3. <p> or <div> with whitespace-pre-wrap / prose / description class on WeebCentral series page
+  for (const p of [...elements(markup, "p"), ...elements(markup, "div")]) {
+    const cls = `${p.attrs.class ?? ""} ${p.attrs.id ?? ""} ${p.attrs.itemprop ?? ""}`;
+    if (/whitespace-pre-wrap|prose|description|synopsis|summary/i.test(cls)) {
+      const text = sanitizeSynopsis(htmlText(p.innerHtml));
+      if (text && !isBoilerplate(text)) return text;
+    }
+  }
+
+  // 4. JSON-LD description
+  for (const scriptMatch of markup.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const parsed = JSON.parse(scriptMatch[1].trim()) as { description?: unknown };
+      if (typeof parsed.description === "string") {
+        const text = sanitizeSynopsis(htmlText(parsed.description));
+        if (text && !isBoilerplate(text)) return text;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 5. Meta og:description or name=description
+  const ogDesc = metaContent(markup, "property", "og:description");
+  if (ogDesc) {
+    const text = sanitizeSynopsis(htmlText(ogDesc));
+    if (text && !isBoilerplate(text)) return text;
+  }
+  const metaDesc = metaContent(markup, "name", "description");
+  if (metaDesc) {
+    const text = sanitizeSynopsis(htmlText(metaDesc));
+    if (text && !isBoilerplate(text)) return text;
+  }
+
+  return ogDesc ? htmlText(ogDesc) : null;
+}
+
 export function normalizeDetails(html: string, externalId: string): MangaDetails {
-  const title = detailsTitle(html);
-  if (!title) throw new SourceError("BAD_RESPONSE", "WeebCentral returned a title we could not read.");
-  const description = metaContent(html, "property", "og:description");
+  const rawTitle = detailsTitle(html);
+  if (!rawTitle) throw new SourceError("BAD_RESPONSE", "WeebCentral returned a title we could not read.");
+  const title = rawTitle.replace(/^Official\s+/i, "").trim() || rawTitle;
+  const alternativeTitles = extractLabelledValues(
+    html,
+    "associated\\s*names?(?:\\(s\\))?|alternative\\s*titles?(?:\\(s\\))?|alt\\s*titles?",
+  ).filter((t) => t.toLowerCase() !== title.toLowerCase());
+  const curated = lookupCuratedSeriesMetadata(title, alternativeTitles);
+
+  const extractedDesc = extractWeebCentralDescription(html, title);
+  const description = extractedDesc ?? curated?.description ?? null;
   const sourceUrl =
     safeUrl(metaContent(html, "property", "og:url"), SITE) ??
     `${SITE}/series/${encodeURIComponent(externalId)}`;
   const coverUrl = safeUrl(metaContent(html, "property", "og:image"), SITE) ?? coverFrom(html);
   const detectedType = contentTypeFrom(html);
+  const extractedGenres = extractWeebCentralGenres(html);
+  const genres = extractedGenres.length > 0 ? extractedGenres : curated?.genres ?? [];
+  const rating = extractWeebCentralRating(html) ?? curated?.rating ?? null;
+  const status = extractStatusFromMarkup(html) ?? curated?.status ?? null;
+  const extractedAuthors = extractLabelledValues(html, "authors?\\(s\\)?|authors?");
+  const authors = extractedAuthors.length > 0 ? extractedAuthors : curated?.author ? [curated.author] : [];
+  const extractedArtists = extractLabelledValues(html, "artists?\\(s\\)?|artists?");
+  const artists = extractedArtists.length > 0 ? extractedArtists : curated?.artist ? [curated.artist] : [];
+  const year = extractYearFromMarkup(html) ?? curated?.year ?? null;
+
   const summary: MangaSummary = {
     id: externalId,
     externalId,
     sourceId: "weebcentral",
     title,
-    alternativeTitles: [],
+    alternativeTitles,
     coverUrl,
-    description: description ? htmlText(description) : null,
-    status: null,
-    genres: [],
-    contentType: detectedType === "unknown" ? "manga" : detectedType,
+    description: description ?? null,
+    status,
+    genres,
+    contentType: detectedType !== "unknown" ? detectedType : curated?.contentType ?? "manga",
     language: "en",
     sourceUrl,
+    rating,
   };
-  return { ...summary, authors: [], artists: [], year: null, availableLanguages: ["en"] };
+  return { ...summary, authors, artists, year, availableLanguages: ["en"] };
 }
 
 export interface ParsedWeebCentralChapterLabel {
@@ -293,7 +643,6 @@ export function parseExplicitReleaseDate(raw: string | null | undefined): string
 }
 
 export function extractReleaseDateFromMarkup(markup: string): string | null {
-  // 1. <time datetime="..."> or data-datetime / data-date / data-released
   const attrPatterns = [
     /<time[^>]*\bdatetime\s*=\s*["']([^"']+)["'][^>]*>/i,
     /\bdata-(?:date)?time\s*=\s*["']([^"']+)["']/i,
@@ -307,7 +656,6 @@ export function extractReleaseDateFromMarkup(markup: string): string | null {
     }
   }
 
-  // 2. Inner text of <time>...</time>
   for (const timeEl of elements(markup, "time")) {
     const dtAttr = timeEl.attrs.datetime || timeEl.attrs["data-datetime"];
     if (dtAttr) {
@@ -319,7 +667,6 @@ export function extractReleaseDateFromMarkup(markup: string): string | null {
     if (parsedInner) return parsedInner;
   }
 
-  // 3. Inline date string in markup text
   const plain = htmlText(markup);
   const inlineDateMatch =
     plain.match(/\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})\b/i) ??
@@ -331,17 +678,6 @@ export function extractReleaseDateFromMarkup(markup: string): string | null {
   return null;
 }
 
-/**
- * Extracts normalized chapter or episode numbers from WeebCentral anchor markup or text.
- * Supports:
- *  - Episode 1, Episode 10, Episode 10.5, Episode 100, Episode 001
- *  - Ep. 10, Ep 10, Ep.10
- *  - Chapter 1, Chapter 10, Chapter 10.5, Chapter 001
- *  - Ch. 10, Ch 10, Ch.10, Chap. 10, Chap 10
- *  - 10, 10.5, 001
- *  - Genuine specials: Prologue, Special Extra, Side Story -> number: null, numberLabel: null
- * Avoids extracting unrelated numbers from chapter titles or release dates.
- */
 export function parseWeebCentralChapterLabel(
   rawMarkupOrText: string,
   surroundingContextHtml?: string,
@@ -350,12 +686,10 @@ export function parseWeebCentralChapterLabel(
     extractReleaseDateFromMarkup(rawMarkupOrText) ??
     (surroundingContextHtml ? extractReleaseDateFromMarkup(surroundingContextHtml) : null);
 
-  // Strip <time> and <svg> blocks before converting HTML to text so dates never pollute chapter labels
   const withoutTimeAndIcons = rawMarkupOrText
     .replace(/<time\b[^>]*>[\s\S]*?<\/time>/gi, " ")
     .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ");
 
-  // Check if leaf <span> elements separate the primary label (e.g. "Episode 10") from a subtitle
   const leafSpanTexts: string[] = [];
   for (const m of withoutTimeAndIcons.matchAll(/<span\b[^>]*>([^<]+)<\/span>/gi)) {
     const t = htmlText(m[1]).trim();
@@ -366,7 +700,6 @@ export function parseWeebCentralChapterLabel(
 
   let text = htmlText(withoutTimeAndIcons).trim();
 
-  // Strip trailing inline dates (e.g. "May 10, 2025", "10 November 2026", "2025-05-10", "3 days ago")
   text = text
     .replace(
       /\s+\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b\s*$/i,
@@ -384,8 +717,6 @@ export function parseWeebCentralChapterLabel(
     return { number: null, numberLabel: null, originalLabel: null, title: null, publishedAt };
   }
 
-  // If multiple leaf spans exist and the first leaf span is an explicit label (e.g. "Episode 10"),
-  // join it with ": " so the subtitle in subsequent spans is cleanly separated.
   if (leafSpanTexts.length >= 2) {
     const firstSpan = leafSpanTexts[0];
     if (/^(?:(?:vol(?:ume)?|season|s|part|pt)\.?\s*\d+\s*[-–—:·]?\s*)?(?:chapter|chap\.?|ch\.?|episode|ep\.?|#)?\s*\d+(?:\.\d+)?$/i.test(firstSpan)) {
@@ -394,7 +725,6 @@ export function parseWeebCentralChapterLabel(
     }
   }
 
-  // 1. Explicit Chapter / Episode / Ch. / Ep. prefix (with optional Vol. / Season / Part prefix)
   const prefixedMatch = text.match(
     /^((?:(?:vol(?:ume)?|season|s|part|pt)\.?\s*\d+\s*[-–—:·]?\s*)?(?:chapter|chap\.?|ch\.?|episode|ep\.?)\s*#?\s*(\d+(?:\.\d+)?))(?:\s*(?:[-–—:·]|\s+)\s*(.+))?$/i,
   );
@@ -415,7 +745,6 @@ export function parseWeebCentralChapterLabel(
     }
   }
 
-  // 2. Pure numeric label (e.g. "10", "10.5", "001") or numeric label with ": Subtitle" / "- Subtitle"
   const bareNumericMatch = text.match(/^(#?\s*(\d+(?:\.\d+)?))(?:\s*[-–—:]\s*(.+))?$/);
   if (bareNumericMatch) {
     const rawOriginalNumeric = bareNumericMatch[1].trim();
@@ -433,7 +762,6 @@ export function parseWeebCentralChapterLabel(
     }
   }
 
-  // 3. Genuine Special Chapter (e.g. "Prologue", "Special Extra", "Side Story", "Special Extra: Room 302")
   return {
     number: null,
     numberLabel: null,
@@ -471,7 +799,6 @@ export function normalizeChapters(html: string, mangaId: string, page: number, l
     if (!match) continue;
     const id = match[1].toUpperCase();
 
-    // Capture sibling markup between this </a> and the next <a (capped at 400 chars) in case <time> is outside <a>
     const endIdx = (fullMatch.index ?? 0) + fullMatch[0].length;
     const nextStartIdx = i + 1 < matches.length ? (matches[i + 1].index ?? endIdx + 400) : endIdx + 400;
     const siblingSnippet = html.slice(endIdx, Math.min(nextStartIdx, endIdx + 400));

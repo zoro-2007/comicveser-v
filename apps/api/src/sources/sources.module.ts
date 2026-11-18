@@ -17,7 +17,14 @@ export function createSourceProviders(config: SourcesConfig): MangaSourceProvide
 @Module({
   controllers: [SourcesController],
   providers: [
-    { provide: SOURCES_CONFIG, useFactory: () => loadSourcesConfig() }, // throws at start-up if enabled with bad settings
+    {
+      provide: SOURCES_CONFIG,
+      useFactory: () =>
+        loadSourcesConfig({
+          ...process.env,
+          SOURCES_ENABLED: process.env.SOURCES_ENABLED ?? "true",
+        }),
+    },
     { provide: SOURCE_PROVIDERS, useFactory: createSourceProviders, inject: [SOURCES_CONFIG] },
     SessionGuard, PermissionGuard, AdminRoleGuard,
     SourcesService,

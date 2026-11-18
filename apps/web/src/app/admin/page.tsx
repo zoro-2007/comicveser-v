@@ -118,7 +118,7 @@ export default function AdminDashboard() {
         const m = new Map<string, { coverUrl: string | null; rating: number; slug: string }>();
         for (const raw of res.items ?? []) {
           const c = toComic(raw);
-          const entry = { coverUrl: c.coverUrl, rating: c.rating || 9.5, slug: c.slug };
+          const entry = { coverUrl: c.coverUrl, rating: c.rating || 0, slug: c.slug };
           m.set(c.id, entry);
           m.set(c.title.toLowerCase(), entry);
         }
@@ -170,7 +170,7 @@ export default function AdminDashboard() {
               ? Number(c.rating)
               : hit?.rating && hit.rating > 0
               ? hit.rating
-              : [9.8, 9.1, 9.3, 9.8, 9.0][idx] ?? 9.5;
+              : null;
           return {
             id: c.id,
             slug: c.slug || hit?.slug || String(c.title).toLowerCase().replace(/[^a-z0-9]+/g, "-"),
@@ -522,7 +522,7 @@ export default function AdminDashboard() {
                   <span className="g">{c.reads} reads this week</span>
                   <br />
                   <span className="stars">
-                    ★★★★★<b>{Number(c.rating).toFixed(1)}</b>
+                    {c.rating && Number(c.rating) > 0 ? <>★★★★★<b>{Number(c.rating).toFixed(1)}</b></> : <b>Not Rated</b>}
                   </span>
                 </span>
               </div>

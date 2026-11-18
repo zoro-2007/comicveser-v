@@ -25,6 +25,8 @@ export interface MangaSummary {
   id: string; externalId: string; sourceId: string; title: string; alternativeTitles: string[];
   coverUrl: string | null; description: string | null; status: string | null; genres: string[];
   contentType: ContentType; language: string | null; sourceUrl: string;
+  /** Genuine rating from the provider (0-10 scale), or null when not provided. Never invented. */
+  rating?: number | null;
   /** Optional fields some search responses already provide; used if full details are challenged. */
   authors?: string[]; artists?: string[]; year?: number | null; availableLanguages?: string[];
 }

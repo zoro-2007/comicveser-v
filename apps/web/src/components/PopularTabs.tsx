@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { Comic } from "@/lib/comics";
+import { Comic, formatRating } from "@/lib/comics";
 import { Cover } from "./ComicCard";
 import EmptyState from "./EmptyState";
 
@@ -12,11 +12,6 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number][0];
 
-/**
- * Asura Popular Top 10 Sidebar Panel (.panel, .pop-tabs, .pop-item, .pop-rank, .stars):
- * Segmented Weekly | Monthly | All Time switcher + numbered rank badge (1–10) over 52x68 cover,
- * title, Genres line, and ★★★★★ rating.
- */
 export default function PopularTabs({ lists }: { lists: Record<Tab, Comic[]> }) {
   const [tab, setTab] = useState<Tab>("weekly");
   const rawList = lists[tab]?.length ? lists[tab] : lists.all;
@@ -56,7 +51,7 @@ export default function PopularTabs({ lists }: { lists: Record<Tab, Comic[]> }) 
         ) : (
           <div id="popList">
             {items.map((c, idx) => {
-              const ratingText = c.rating && c.rating > 0 ? c.rating.toFixed(1) : "9.5";
+              const ratingText = formatRating(c);
               const genresText = c.genres.slice(0, 3).join(", ") || c.type;
               return (
                 <Link key={c.id} href={`/comics/${c.slug}`} className="pop-item">
@@ -76,7 +71,13 @@ export default function PopularTabs({ lists }: { lists: Record<Tab, Comic[]> }) 
                     </span>
                     <br />
                     <span className="stars">
-                      ★★★★★<b>{ratingText}</b>
+                      {ratingText === "Not Rated" ? (
+                        <b>Not Rated</b>
+                      ) : (
+                        <>
+                          ★★★★★<b>{ratingText}</b>
+                        </>
+                      )}
                     </span>
                   </span>
                 </Link>

@@ -32,9 +32,21 @@ Never share a database or bucket between environments. Tests must only ever use 
 | `MAIL_PROVIDER`, `RESEND_API_KEY`, `MAIL_FROM` | yes | |
 | `TRUST_PROXY` | yes behind a proxy | usually `1` |
 | `COOKIE_DOMAIN` | if app/api are subdomains | `.example.com` |
-| `REDIS_URL` | recommended | cache; falls back to memory |
-| `DISABLE_JOBS` | optional | `true` on extra replicas |
+| `REDIS_URL` | recommended | cache & distributed lock for automatic sync; falls back to memory |
+| `SOURCES_ENABLED` | recommended | `true` to enable Asura Scans, ComicK, and WeebCentral catalog & sync |
+| `SOURCE_SYNC_ENABLED` | optional | `true` (default) to run automatic chapter synchronization |
+| `SOURCE_SYNC_INTERVAL_MINUTES` | optional | `10` (default) — runs automatic chapter sync every 10 minutes |
+| `SOURCE_SYNC_BATCH_SIZE` | optional | `20` (default) — published comics checked per cycle with fair rotation |
+| `SOURCES_TIMEOUT_MS` | optional | `10000` (default) — per-request upstream timeout in ms |
+| `DISABLE_JOBS` | optional | `true` on extra replicas to disable background schedulers |
 | `PAYMENTS_ENABLED` + `RAZORPAY_*` | optional | leave unset to keep payments off |
+
+## Automatic 10-Minute Chapter Synchronization
+When `SOURCES_ENABLED=true` and `SOURCE_SYNC_ENABLED=true` (both enabled by default in `render.yaml` and `.env.example`), `SourcesService` starts an automatic background synchronization scheduler on NestJS module initialization (`OnModuleInit`) and cleans up timers on shutdown (`OnModuleDestroy`).
+- **Default Interval**: Every **10 minutes** (`SOURCE_SYNC_INTERVAL_MINUTES=10`, `600,000 ms`), plus an initial warm-up pass 15 seconds after server startup.
+- **Distributed Lock**: Acquires `lock:sources:auto-chapter-sync` via `CacheService.tryLock` (TTL 15 minutes) so concurrent executions never overlap across processes or manual triggers.
+- **Fair Batch Rotation**: Orders eligible published comics by oldest `lastSyncedAt` first (`NULLS FIRST`) with a rotating round-robin cursor, stamping `lastSyncedAt` even when a provider times out or rate-limits so failing titles never starve comics outside the first batch.
+- See `docs/AUTOMATIC-SYNC.md` for full architecture and operational details.
 
 ## Release process
 1. Open a pull request. CI runs type-check, build, unit tests, API integration tests, web build and browser tests.

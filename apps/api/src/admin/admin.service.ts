@@ -7,7 +7,9 @@ import {
   NotFoundException,
   Optional,
 } from "@nestjs/common";
-import { Prisma, UserStatus } from "@prisma/client";
+import { ComicType, Prisma, UserStatus } from "@prisma/client";
+import { slugify } from "../common/util";
+import { fetchExternalProviderMetadata, isPlaceholderComicDescription, lookupCuratedSeriesMetadata } from "../sources/known-metadata";
 import { createHash, randomUUID } from "crypto";
 import * as yauzl from "yauzl";
 import { PrismaService } from "../prisma/prisma.service";
@@ -217,6 +219,78 @@ export class AdminService {
     };
   }
 
+  private async repairAdminComicRowIfNeeded(row: any, allowNetworkLookup = false): Promise<void> {
+    if (!row || !row.id || !row.title) return;
+    const needsDesc = isPlaceholderComicDescription(row.description, row.title);
+    const hasGenres = Array.isArray(row.genres) && row.genres.length > 0;
+    const hasRating = typeof row.providerRating === "number" && row.providerRating > 0;
+    if (!needsDesc && hasGenres && hasRating) return;
+
+    const altTitles = row.altTitle ? [String(row.altTitle)] : [];
+    const meta = allowNetworkLookup
+      ? await fetchExternalProviderMetadata(row.title, altTitles)
+      : lookupCuratedSeriesMetadata(row.title, altTitles);
+    if (!meta) return;
+
+    const patch: Record<string, unknown> = {};
+    if (needsDesc && meta.description && !isPlaceholderComicDescription(meta.description, row.title)) {
+      row.description = meta.description;
+      patch.description = meta.description.slice(0, 5000);
+    }
+    if (!hasRating && typeof meta.rating === "number" && meta.rating > 0) {
+      row.providerRating = meta.rating;
+      patch.providerRating = meta.rating;
+    }
+    if ((!row.author || row.author === "Unknown") && meta.author) {
+      row.author = meta.author;
+      patch.author = meta.author.slice(0, 120);
+    }
+    if ((!row.artist || row.artist === "Unknown") && meta.artist) {
+      row.artist = meta.artist;
+      patch.artist = meta.artist.slice(0, 120);
+    }
+    if (row.type === "MANGA" && meta.contentType === "manhwa") {
+      row.type = ComicType.MANHWA;
+      patch.type = ComicType.MANHWA;
+    }
+
+    if (!hasGenres && meta.genres.length > 0) {
+      row.genres = meta.genres.map((name) => ({
+        genre: { name, slug: slugify(name) },
+      }));
+      if (typeof (this.db as any)?.genre?.upsert === "function" && typeof (this.db as any)?.comicGenre?.createMany === "function") {
+        try {
+          const genreIds: string[] = [];
+          for (const gName of meta.genres) {
+            const gSlug = slugify(gName);
+            if (!gSlug) continue;
+            const gRow = await (this.db as any).genre.upsert({
+              where: { slug: gSlug },
+              update: {},
+              create: { slug: gSlug, name: gName },
+            });
+            if (gRow?.id) genreIds.push(gRow.id);
+          }
+          if (genreIds.length > 0) {
+            await (this.db as any).comicGenre.createMany({
+              data: genreIds.map((genreId) => ({ comicId: row.id, genreId })),
+              skipDuplicates: true,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (Object.keys(patch).length > 0 && typeof (this.db.comic as any)?.update === "function") {
+      if (row.updatedAt) patch.updatedAt = row.updatedAt;
+      await (this.db.comic as any)
+        .update({ where: { id: row.id }, data: patch })
+        .catch(() => {});
+    }
+  }
+
   async comics(q: AdminListQuery) {
     const where: Prisma.ComicWhereInput = {
       deletedAt: null,
@@ -229,11 +303,12 @@ export class AdminService {
         where,
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         ...pg(q.page),
-        include: { _count: { select: { chapters: { where: { deletedAt: null } } } } },
+        include: { genres: { include: { genre: true } }, _count: { select: { chapters: { where: { deletedAt: null } } } } },
       }),
     ]);
+    await Promise.all(rawItems.map((c) => this.repairAdminComicRowIfNeeded(c, false)));
     const seen = new Set<string>();
-    const items = rawItems.filter((c) => {
+    const items = rawItems.map((c: any) => ({ ...c, rating: c.providerRating ?? c.rating ?? null })).filter((c) => {
       const k = c.title.trim().toLowerCase().replace(/^official\s+/i, "").replace(/[^a-z0-9]+/g, "") || c.id;
       if (seen.has(k)) return false;
       seen.add(k);
@@ -249,8 +324,9 @@ export class AdminService {
       include: { genres: { include: { genre: true } } },
     });
     if (!c) throw new NotFoundException("Comic not found.");
+    await this.repairAdminComicRowIfNeeded(c, true);
     const { genres, ...rest } = c;
-    return { ...rest, genreSlugs: genres.map((g) => g.genre.slug) };
+    return { ...rest, rating: (c as any).providerRating ?? null, genreSlugs: genres.map((g) => g.genre.slug) };
   }
 
   chapters(comicId?: string) {

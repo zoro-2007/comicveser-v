@@ -28,17 +28,10 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
     every(60_000, () => this.publishDue(), "publishDue");
     every(6 * 3600_000, () => this.cleanup(), "cleanup");
 
+    // Ensure the 10-minute automatic source chapter sync lifecycle scheduler is started
     const syncCfg = loadSourceSyncConfig();
-    if (syncCfg.enabled && this.sources) {
-      this.log.log(
-        `Automatic source chapter synchronization enabled (interval=${syncCfg.intervalMinutes}m, batchSize=${syncCfg.batchSize})`,
-      );
-      every(syncCfg.intervalMs, () => this.syncSourceChapters(), "syncSourceChapters");
-      const startupTimer = setTimeout(() => {
-        this.syncSourceChapters().catch((e) => this.log.error(`syncSourceChapters(startup): ${e.message}`));
-      }, 15_000);
-      startupTimer.unref();
-      this.timers.push(startupTimer);
+    if (syncCfg.enabled && this.sources && !this.sources.isSchedulerRunning()) {
+      this.sources.startAutomaticSyncScheduler();
     }
   }
 
@@ -50,7 +43,7 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
     this.timers = [];
   }
 
-  /** Automatically detects and publishes new chapters from WeebCentral and AsuraScans for approved published comics. */
+  /** Automatically detects and publishes new chapters from supported providers for approved published comics. */
   async syncSourceChapters() {
     if (!this.sources) return null;
     const syncCfg = loadSourceSyncConfig();

@@ -140,14 +140,64 @@ function names(value: unknown): string[] {
   return [...new Set(items)];
 }
 
-function genresFrom(row: Raw): string[] {
-  const items = [
+export function genresFrom(row: Raw, parent?: Raw): string[] {
+  const muCategories = list(obj(row.mu_comics).mu_comic_categories).map(
+    (entry) => obj(entry).mu_categories ?? entry,
+  );
+  const rawEntries = [
     ...list(row.genres),
     ...list(row.md_comic_md_genres).map((entry) => obj(entry).md_genres ?? entry),
-  ]
-    .map((entry) => str(entry) ?? str(obj(entry).name) ?? str(obj(entry).slug))
-    .filter((entry): entry is string => !!entry);
-  return [...new Set(items)];
+    ...list(row.categories),
+    ...list(row.tags),
+    ...muCategories,
+    ...(parent
+      ? [
+          ...list(parent.genres),
+          ...list(parent.md_comic_md_genres).map((entry) => obj(entry).md_genres ?? entry),
+          ...list(parent.categories),
+        ]
+      : []),
+  ];
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of rawEntries) {
+    const candidate =
+      str(entry) ??
+      str(obj(entry).name) ??
+      str(obj(entry).title) ??
+      str(obj(entry).label) ??
+      str(obj(entry).slug);
+    if (!candidate) continue;
+    const cleaned = candidate.replace(/\s+/g, " ").trim();
+    // Ignore numeric genre IDs returned in some search payloads
+    if (!cleaned || /^\d+$/.test(cleaned) || cleaned.length > 50) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+export function ratingFrom(row: Raw, parent?: Raw): number | null {
+  const candidates: unknown[] = [
+    row.bayesian_rating,
+    row.rating,
+    row.score,
+    row.average_rating,
+    row.user_rating,
+    parent?.bayesian_rating,
+    parent?.rating,
+    parent?.score,
+  ];
+  for (const c of candidates) {
+    const parsed = num(c);
+    if (parsed === null || parsed <= 0) continue;
+    if (parsed <= 10) return Number(parsed.toFixed(2));
+    if (parsed <= 100) return Number((parsed / 10).toFixed(2));
+  }
+  return null;
 }
 
 function sourceUrl(externalId: string, slug: unknown): string {
@@ -166,7 +216,7 @@ function year(value: unknown): number | null {
   return parsed !== null && Number.isInteger(parsed) && parsed >= 1900 && parsed <= 2100 ? parsed : null;
 }
 
-function normalizeSummary(raw: unknown): MangaSummary | null {
+function normalizeSummary(raw: unknown, parent?: Raw): MangaSummary | null {
   const row = obj(raw);
   const externalId = str(row.hid) ?? str(row.slug) ?? numberOrString(row.id);
   const title = str(row.title) ?? str(row.name);
@@ -183,6 +233,7 @@ function normalizeSummary(raw: unknown): MangaSummary | null {
       .filter((language) => /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i.test(language))
   )];
   const rawLang = str(row.iso639_1) ?? str(row.lang);
+  const rating = ratingFrom(row, parent);
   return {
     id: externalId,
     externalId,
@@ -192,10 +243,11 @@ function normalizeSummary(raw: unknown): MangaSummary | null {
     coverUrl: cover,
     description: cleanText(row.desc ?? row.description ?? row.parsed),
     status: normalizeStatus(row.status),
-    genres: genresFrom(row),
+    genres: genresFrom(row, parent),
     contentType: normalizeContentType(row.country ?? row.origination ?? row.type),
     language: rawLang ? normalizeLanguageCode(rawLang) : null,
     sourceUrl: sourceUrl(externalId, row.slug),
+    rating,
     ...(authors.length ? { authors } : {}),
     ...(artists.length ? { artists } : {}),
     ...(year(row.year) !== null ? { year: year(row.year) } : {}),
@@ -217,7 +269,7 @@ export function normalizeSearch(raw: unknown, query: SearchQuery): SearchRespons
   if (!rawList) throw new SourceError("BAD_RESPONSE", "ComicK sent a search response we could not read.");
   const seen = new Set<string>();
   const filtered = rawList
-    .map(normalizeSummary)
+    .map((entry) => normalizeSummary(entry))
     .filter((item): item is MangaSummary => {
       if (!item || seen.has(item.externalId)) return false;
       if (query.type && query.type !== "unknown" && item.contentType !== "unknown" && item.contentType !== query.type) return false;
@@ -225,10 +277,6 @@ export function normalizeSearch(raw: unknown, query: SearchQuery): SearchRespons
       return true;
     });
   const totalFromBody = num(body.total ?? body.count);
-  // ComicK search returns one page per upstream request unless the caller got a
-  // full unpaged array that actually exceeds `query.limit`. Do not slice by
-  // `(page - 1) * limit` when `rawList.length <= query.limit`, otherwise page 2+
-  // gets emptied out.
   const isUnpagedFullList = rawList.length > query.limit;
   const start = isUnpagedFullList ? (query.page - 1) * query.limit : 0;
   const items = isUnpagedFullList ? filtered.slice(start, start + query.limit) : filtered.slice(0, query.limit);
@@ -305,8 +353,6 @@ export function normalizeChapters(raw: unknown, externalId: string, requestedLan
   const numberCounts = new Map<string, number>();
   for (const item of all) if (item.numberLabel) numberCounts.set(item.numberLabel, (numberCounts.get(item.numberLabel) ?? 0) + 1);
   for (const item of all) item.duplicateNumber = !!item.numberLabel && (numberCounts.get(item.numberLabel) ?? 0) > 1;
-  // The ComicK endpoint already applies the requested page and limit. Do not
-  // slice by page a second time: that would discard every row on page 2+.
   const items = all;
   const hasMore = total === null ? chapterList.length >= limit : (page - 1) * limit + items.length < total;
   return { items, total: total ?? (page - 1) * limit + items.length, totalExact: total !== null, page, limit, hasMore };
@@ -375,7 +421,7 @@ export function normalizePages(raw: unknown, chapterId: string, mangaId?: string
 export function normalizeDetails(raw: unknown, externalId: string): MangaDetails {
   const body = obj(raw);
   const comic = Object.keys(obj(body.comic)).length ? obj(body.comic) : body;
-  const summary = normalizeSummary(comic);
+  const summary = normalizeSummary(comic, body);
   const slug = str(comic.slug);
   if (!summary || (summary.externalId !== externalId && slug !== externalId)) {
     throw new SourceError("BAD_RESPONSE", "ComicK returned title details we could not read.");
@@ -401,6 +447,8 @@ export function normalizeDetails(raw: unknown, externalId: string): MangaDetails
     externalId: resolvedId,
     alternativeTitles,
     coverUrl: cover,
+    genres: genresFrom(comic, body),
+    rating: ratingFrom(comic, body),
     authors: names(comic.author ?? comic.authors ?? body.authors ?? comic.md_comic_md_authors),
     artists: names(comic.artist ?? comic.artists ?? body.artists ?? comic.md_comic_md_artists),
     year: year(comic.year),

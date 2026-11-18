@@ -12,6 +12,9 @@ import {
   NotFoundException,
   Param,
   Post,
+  Put,
+  Query,
+  Req,
 } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from "class-validator";
@@ -22,6 +25,7 @@ import { MailService } from "../mail/mail.service";
 import { primaryWebOrigin } from "../common/config";
 
 export const ISSUE_CATEGORIES = [
+  "COMIC_REQUEST",
   "BUG",
   "BROKEN_CHAPTER",
   "LOGIN_ISSUE",
@@ -36,7 +40,7 @@ export type IssueCategory = (typeof ISSUE_CATEGORIES)[number];
 class RateDto {
   @IsInt()
   @Min(1)
-  @Max(5)
+  @Max(10)
   value: number;
 }
 
@@ -52,9 +56,35 @@ class CommentDto extends BodyDto {
   parentId?: string;
 }
 
+export class RequestComicDto {
+  @IsString()
+  @Length(2, 200)
+  title: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 40)
+  comicType?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(0, 300)
+  providerOrUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(0, 1000)
+  notes?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(0, 2000)
+  description?: string;
+}
+
 export class ReportDto {
   @IsOptional()
-  @IsIn(["comic", "chapter", "review", "comment", "platform", "account"])
+  @IsIn(["comic", "chapter", "review", "comment", "platform", "account", "comic_request"])
   targetType?: string;
 
   @IsOptional()
@@ -136,6 +166,54 @@ export class ReviewsService {
     };
   }
 
+  async listForComic(comicId: string, page = 1) {
+    const size = 20;
+    const p = Math.max(1, Number(page) || 1);
+    const [reviews, total, agg, ratings] = await Promise.all([
+      this.db.review.findMany({
+        where: { comicId, deletedAt: null },
+        orderBy: [{ helpfulCount: "desc" }, { createdAt: "desc" }],
+        skip: (p - 1) * size,
+        take: size,
+        include: { user: { select: { id: true, username: true } } },
+      }),
+      this.db.review.count({ where: { comicId, deletedAt: null } }),
+      this.db.rating.aggregate({
+        where: { comicId },
+        _avg: { value: true },
+        _count: { value: true },
+      }),
+      this.db.rating.findMany({
+        where: { comicId },
+        select: { userId: true, value: true },
+      }),
+    ]);
+    const ratingMap = new Map(ratings.map((r) => [r.userId, r.value]));
+    return {
+      average: agg._avg.value ?? null,
+      ratingCount: agg._count.value ?? 0,
+      total,
+      page: p,
+      pages: Math.max(1, Math.ceil(total / size)),
+      items: reviews.map((r) => ({
+        ...r,
+        rating: ratingMap.get(r.userId) ?? null,
+      })),
+    };
+  }
+
+  async mineForComic(userId: string | null, comicId: string) {
+    if (!userId) return { rating: null, review: null };
+    const [ratingRow, reviewRow] = await Promise.all([
+      this.db.rating.findUnique({ where: { userId_comicId: { userId, comicId } } }).catch(() => null),
+      this.db.review.findUnique({ where: { userId_comicId: { userId, comicId } } }).catch(() => null),
+    ]);
+    return {
+      rating: ratingRow?.value ?? null,
+      review: reviewRow && !reviewRow.deletedAt ? { id: reviewRow.id, body: reviewRow.body } : null,
+    };
+  }
+
   rate(userId: string, comicId: string, value: number) {
     return this.db.rating.upsert({
       where: { userId_comicId: { userId, comicId } },
@@ -210,7 +288,7 @@ export class ReviewsService {
     }
 
     const category = (
-      d.category ||
+      (subject.startsWith("Comic Request:") ? "COMIC_REQUEST" : d.category) ||
       (d.targetType === "chapter"
         ? "BROKEN_CHAPTER"
         : d.targetType === "comic"
@@ -351,6 +429,34 @@ export class ReviewsService {
     };
   }
 
+  async requestComic(u: AuthUser, d: RequestComicDto) {
+    const cleanTitle = (d.title ?? "").trim();
+    if (cleanTitle.length < 2) {
+      throw new BadRequestException("Please enter the comic title you want to request (at least 2 characters).");
+    }
+    const typeLabel = (d.comicType ?? "Manhwa").trim() || "Manhwa";
+    const sourceText = (d.providerOrUrl ?? "").trim();
+    const notesText = (d.notes ?? d.description ?? "").trim();
+    const subject = `Comic Request: ${cleanTitle} (${typeLabel})`;
+    const detailsParts = [
+      `Requested Title: ${cleanTitle}`,
+      `Format / Type: ${typeLabel}`,
+      ...(sourceText ? [`Preferred Source / URL: ${sourceText}`] : []),
+      ...(notesText ? [`Notes: ${notesText}`] : []),
+    ];
+    const fullDescription = detailsParts.join("\n");
+    const reasonText = `[COMIC_REQUEST] ${subject} — ${detailsParts.join(" | ")}`.slice(0, 500);
+
+    return this.report(u, {
+      targetType: "comic_request",
+      targetId: cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 80) || "comic-request",
+      category: "COMIC_REQUEST",
+      subject,
+      description: fullDescription,
+      reason: reasonText,
+    });
+  }
+
   async myReports(userId: string) {
     const items = await this.db.report.findMany({
       where: { reporterId: userId },
@@ -380,6 +486,31 @@ export class ReviewsService {
 @Controller()
 export class ReviewsController {
   constructor(private svc: ReviewsService) {}
+
+  @Get("comics/:comicId/reviews")
+  reviewsList(@Param("comicId") id: string, @Query("page") page?: string) {
+    return this.svc.listForComic(id, Number(page) || 1);
+  }
+
+  @Get("comics/:comicId/mine")
+  async mine(@Req() req: any, @Param("comicId") id: string) {
+    const uid = req?.user?.id ?? null;
+    return this.svc.mineForComic(uid, id);
+  }
+
+  @Authenticated()
+  @Put("comics/:comicId/rating")
+  putRate(@CurrentUser() u: AuthUser, @Param("comicId") id: string, @Body() d: RateDto) {
+    return this.svc.rate(u.id, id, d.value);
+  }
+
+  @Authenticated()
+  @Put("reviews/:id")
+  async updateReviewById(@CurrentUser() u: AuthUser, @Param("id") id: string, @Body() d: BodyDto) {
+    const existing = await (this.svc as any).db.review.findUnique({ where: { id } });
+    if (!existing || existing.userId !== u.id) throw new ForbiddenException();
+    return (this.svc as any).db.review.update({ where: { id }, data: { body: d.body, deletedAt: null } });
+  }
 
   @Get("comics/:comicId/engagement")
   forComic(@Param("comicId") id: string) {
@@ -429,6 +560,12 @@ export class ReviewsController {
   @Post("reports")
   report(@CurrentUser() u: AuthUser, @Body() d: ReportDto) {
     return this.svc.report(u, d);
+  }
+
+  @Authenticated()
+  @Post("comics/requests")
+  requestComic(@CurrentUser() u: AuthUser, @Body() d: RequestComicDto) {
+    return this.svc.requestComic(u, d);
   }
 
   @Authenticated()
