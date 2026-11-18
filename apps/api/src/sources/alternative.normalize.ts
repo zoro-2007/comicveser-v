@@ -9,6 +9,8 @@ import type {
 export const ALTERNATIVE_PROVIDER_IDS = ["weebcentral", "asurascans"] as const;
 export const ALL_PROVIDER_IDS = ["weebcentral", "asurascans", "comick"] as const;
 
+const PLACEHOLDER_ALT_TITLE = /^(?:n\/?a|none|unknown|tbd|null|undefined|-+|\.+|\?+)$/i;
+
 export function normalizeMatchText(value: string): string {
   return value
     .toLowerCase()
@@ -29,9 +31,14 @@ export function splitCandidateTitles(raw?: string | null | string[]): string[] {
   const seen = new Set<string>();
   for (const entry of items) {
     if (typeof entry !== "string") continue;
-    for (const part of entry.split(/\s*(?:\||\/|·|;|\n)\s*/)) {
+    const rawTrimmed = entry.trim();
+    if (!rawTrimmed || PLACEHOLDER_ALT_TITLE.test(rawTrimmed)) continue;
+    // Do not split "N/A" or short slash abbreviations into single-letter tokens
+    for (const part of rawTrimmed.split(/\s*(?:\||\/|·|;|\n)\s*/)) {
       const trimmed = part.trim();
-      if (!trimmed) continue;
+      if (!trimmed || trimmed.length < 3 || PLACEHOLDER_ALT_TITLE.test(trimmed)) continue;
+      const norm = normalizeMatchText(trimmed);
+      if (norm.length < 3) continue;
       const key = trimmed.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -100,13 +107,59 @@ const SEQUEL_OR_SPINOFF_TOKENS = new Set([
   "3",
 ]);
 
+const STOPWORDS = new Set([
+  "the",
+  "of",
+  "and",
+  "in",
+  "to",
+  "a",
+  "an",
+  "as",
+  "is",
+  "my",
+  "i",
+  "am",
+  "for",
+  "on",
+  "at",
+  "by",
+  "with",
+  "from",
+]);
+
 function hasConflictingSequelMarker(a: string, b: string): boolean {
   const tokensA = new Set(normalizeMatchText(a).split(" ").filter(Boolean));
   const tokensB = new Set(normalizeMatchText(b).split(" ").filter(Boolean));
+  if (tokensA.size === 0 || tokensB.size === 0) return false;
   for (const tok of SEQUEL_OR_SPINOFF_TOKENS) {
     if (tokensA.has(tok) !== tokensB.has(tok)) return true;
   }
   return false;
+}
+
+function stripSequelMarkers(value: string): string {
+  return normalizeMatchText(value)
+    .split(" ")
+    .filter((tok) => tok && !SEQUEL_OR_SPINOFF_TOKENS.has(tok))
+    .join(" ")
+    .trim();
+}
+
+/**
+ * Returns true only when `a` and `b` share the exact same base title and differ only by a sequel/spin-off marker
+ * (for example, "Solo Leveling" vs "Solo Leveling: Ragnarok").
+ * Never matches unrelated titles such as "Solo Swordmaster" or "My Girlfriend Returned as a Dragon".
+ */
+function isSequelOrSpinoffOfSameSeries(a: string, b: string): boolean {
+  const na = normalizeMatchText(a);
+  const nb = normalizeMatchText(b);
+  if (na.length < 5 || nb.length < 5) return false;
+  if (!hasConflictingSequelMarker(na, nb)) return false;
+  const baseA = stripSequelMarkers(na);
+  const baseB = stripSequelMarkers(nb);
+  if (baseA.length < 5 || baseB.length < 5) return false;
+  return baseA === baseB;
 }
 
 /**
@@ -130,10 +183,10 @@ export function findCrossProviderPublishedMatch(
   const altTitleNorms = new Set(
     splitCandidateTitles(candidate.alternativeTitles)
       .map(normalizeCompactTitleKey)
-      .filter((k) => k.length >= 2 && k !== primaryTitleNorm),
+      .filter((k) => k.length >= 3 && k !== primaryTitleNorm),
   );
   const allCandidateNorms = new Set(
-    [primaryTitleNorm, ...altTitleNorms].filter((k) => k.length >= 2),
+    [primaryTitleNorm, ...altTitleNorms].filter((k) => k.length >= 3),
   );
   if (allCandidateNorms.size === 0) {
     return { confirmedMatch: null, ambiguousMatches: [] };
@@ -154,14 +207,14 @@ export function findCrossProviderPublishedMatch(
     const comicAltNorms = new Set(
       comicAltStrings
         .map(normalizeCompactTitleKey)
-        .filter((k) => k.length >= 2 && k !== comicPrimaryNorm),
+        .filter((k) => k.length >= 3 && k !== comicPrimaryNorm),
     );
 
     const matchesPrimary =
-      (comicPrimaryNorm.length >= 2 && comicPrimaryNorm === primaryTitleNorm) ||
-      (comicPrimaryNorm.length >= 2 && altTitleNorms.has(comicPrimaryNorm));
+      (comicPrimaryNorm.length >= 3 && comicPrimaryNorm === primaryTitleNorm) ||
+      (comicPrimaryNorm.length >= 3 && altTitleNorms.has(comicPrimaryNorm));
     const matchesAlt =
-      (primaryTitleNorm.length >= 2 && comicAltNorms.has(primaryTitleNorm)) ||
+      (primaryTitleNorm.length >= 3 && comicAltNorms.has(primaryTitleNorm)) ||
       [...altTitleNorms].some((k) => comicAltNorms.has(k));
 
     if (matchesPrimary || matchesAlt) {
@@ -173,10 +226,12 @@ export function findCrossProviderPublishedMatch(
     }
 
     // Check if it is an uncertain/partial match (e.g. "Solo Leveling" vs "Solo Leveling: Ragnarok")
-    const allComicStrings = [comic.title, ...comicAltStrings].filter(Boolean);
-    const allCandStrings = [candidate.title, ...splitCandidateTitles(candidate.alternativeTitles)].filter(Boolean);
+    const allComicStrings = [comic.title, ...comicAltStrings].filter((s) => normalizeMatchText(s).length >= 5);
+    const allCandStrings = [candidate.title, ...splitCandidateTitles(candidate.alternativeTitles)].filter(
+      (s) => normalizeMatchText(s).length >= 5,
+    );
     const isRough = allCandStrings.some((ca) =>
-      allComicStrings.some((co) => titlesRoughlyMatch(ca, co) || hasConflictingSequelMarker(ca, co) && (normalizeMatchText(ca).includes(normalizeMatchText(co)) || normalizeMatchText(co).includes(normalizeMatchText(ca)))),
+      allComicStrings.some((co) => titlesRoughlyMatch(ca, co) || isSequelOrSpinoffOfSameSeries(ca, co)),
     );
     if (isRough) {
       roughMatches.push(comic);
@@ -246,12 +301,23 @@ export function titlesRoughlyMatch(a: string, b: string): boolean {
   if (!na || !nb) return false;
   if (na === nb) return true;
   if (hasConflictingSequelMarker(a, b)) return false;
-  if (na.length >= 6 && nb.length >= 6 && (na.includes(nb) || nb.includes(na))) return true;
-  const tokensA = na.split(" ").filter((t) => t.length > 1);
-  const tokensB = new Set(nb.split(" ").filter((t) => t.length > 1));
+
+  const shorter = na.length <= nb.length ? na : nb;
+  const longer = na.length <= nb.length ? nb : na;
+  if (
+    shorter.length >= 10 &&
+    shorter.split(" ").length >= 2 &&
+    shorter.length / longer.length >= 0.65 &&
+    ` ${longer} `.includes(` ${shorter} `)
+  ) {
+    return true;
+  }
+
+  const tokensA = na.split(" ").filter((t) => t.length > 2 && !STOPWORDS.has(t));
+  const tokensB = new Set(nb.split(" ").filter((t) => t.length > 2 && !STOPWORDS.has(t)));
   if (tokensA.length < 2 || tokensB.size < 2) return false;
   const overlap = tokensA.filter((t) => tokensB.has(t)).length;
-  return overlap / Math.max(tokensA.length, tokensB.size) >= 0.75;
+  return overlap / Math.max(tokensA.length, tokensB.size) >= 0.85;
 }
 
 export function chapterNumbersMatch(
@@ -323,7 +389,7 @@ export function buildAlternativeSourceMatch(
     coverUrl: matchedItem.coverUrl,
     sourceUrl: matchedItem.sourceUrl,
     catalogUrl: `/sources/${encodeURIComponent(altSourceId)}/${encodeURIComponent(matchedItem.externalId)}`,
-    adminReviewUrl: `/admin/comics/new/${encodeURIComponent(altSourceId)}/${encodeURIComponent(matchedItem.externalId)}`,
+    language,
     totalChapters: chRes.total,
     chapters,
     matchedChapter,

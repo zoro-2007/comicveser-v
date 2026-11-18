@@ -10,12 +10,13 @@ type Ctx = {
   ready: boolean;
   signedIn: boolean;
   isBookmarked: (comicId: string) => boolean;
+  bookmarkedItems: { id: string; type: string }[];
   toggleBookmark: (comicId: string) => Promise<void>;
   progressFor: (comicId: string) => ReadingProgress | null;
 };
 const LibraryContext = createContext<Ctx | null>(null);
 
-const EMPTY: Ctx = { ready: true, signedIn: false, isBookmarked: () => false, toggleBookmark: async () => {}, progressFor: () => null };
+const EMPTY: Ctx = { ready: true, signedIn: false, isBookmarked: () => false, bookmarkedItems: [], toggleBookmark: async () => {}, progressFor: () => null };
 export const useLibrary = (): Ctx => useContext(LibraryContext) ?? EMPTY;
 
 /**
@@ -26,6 +27,7 @@ export default function LibraryProvider({ children }: { children: React.ReactNod
   const { user, status } = useAuth();
   const router = useRouter();
   const [marks, setMarks] = useState<Set<string>>(new Set());
+  const [markItems, setMarkItems] = useState<{ id: string; type: string }[]>([]);
   const [history, setHistory] = useState<Map<string, ReadingProgress>>(new Map());
   const [ready, setReady] = useState(false);
   const userId = user?.id ?? null;
@@ -41,14 +43,20 @@ export default function LibraryProvider({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (status === "loading") return;
-    if (!userId) { setMarks(new Set()); setHistory(new Map()); setReady(true); return; }
+    if (!userId) { setMarks(new Set()); setMarkItems([]); setHistory(new Map()); setReady(true); return; }
     let live = true;
     (async () => {
       const ids = new Set<string>();
+      const collected: { id: string; type: string }[] = [];
       try {
         for (let page = 1; page <= 10; page++) {
-          const r = await api<{ total: number; items: { comic: { id: string } }[] }>(`/user/bookmarks?page=${page}`, { credentials: "include", cache: "no-store" });
-          r.items.forEach((b) => ids.add(b.comic.id));
+          const r = await api<{ total: number; items: { comic: { id: string; type?: string } }[] }>(`/user/bookmarks?page=${page}`, { credentials: "include", cache: "no-store" });
+          r.items.forEach((b) => {
+            if (!ids.has(b.comic.id)) {
+              ids.add(b.comic.id);
+              collected.push({ id: b.comic.id, type: String(b.comic.type ?? "MANGA").toUpperCase() });
+            }
+          });
           if (!r.items.length || ids.size >= r.total) break;
         }
       } catch { /* bookmarks are optional UI; never block the page */ }
@@ -57,7 +65,7 @@ export default function LibraryProvider({ children }: { children: React.ReactNod
         const h = await api<{ comic: { id: string }; chapter: { id: string; number: number; displayNumber?: string }; imageIndex: number }[]>("/user/history", { credentials: "include", cache: "no-store" });
         h.forEach((x) => hist.set(x.comic.id, { chapterId: x.chapter.id, number: x.chapter.number, displayNumber: x.chapter.displayNumber, imageIndex: x.imageIndex }));
       } catch { /* same */ }
-      if (live) { setMarks(ids); setHistory(hist); setReady(true); }
+      if (live) { setMarks(ids); setMarkItems(collected); setHistory(hist); setReady(true); }
     })();
     return () => { live = false; };
   }, [userId, status, version]);
@@ -79,9 +87,10 @@ export default function LibraryProvider({ children }: { children: React.ReactNod
   const value = useMemo<Ctx>(() => ({
     ready, signedIn: !!userId,
     isBookmarked: (id) => marks.has(id),
+    bookmarkedItems: markItems,
     toggleBookmark,
     progressFor: (id) => history.get(id) ?? null,
-  }), [ready, userId, marks, history, toggleBookmark]);
+  }), [ready, userId, marks, markItems, history, toggleBookmark]);
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
 }

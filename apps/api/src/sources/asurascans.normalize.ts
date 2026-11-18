@@ -158,17 +158,20 @@ export function normalizeSummary(raw: unknown): MangaSummary | null {
     sourceUrl = url.toString();
   } catch { return null; }
   const description = str(row.description);
+  const rawAltStr = typeof row.alt_title === "string" && !/^(?:n\/?a|none|unknown|tbd|-+|\.+)$/i.test(row.alt_title.trim())
+    ? row.alt_title
+    : "";
   const altTitlesRaw = [
     ...list(row.alt_titles),
     ...list(row.alternative_titles),
-    ...(typeof row.alt_title === "string" ? row.alt_title.split(/[|/,;]+/) : []),
+    ...(rawAltStr ? rawAltStr.split(/[|,;]+/) : []),
   ];
   const alternativeTitles = [
     ...new Set(
       altTitlesRaw
         .filter((value): value is string => typeof value === "string" && !!value.trim())
         .map((v) => v.trim())
-        .filter((v) => v.toLowerCase() !== title.toLowerCase()),
+        .filter((v) => v.length >= 3 && !/^(?:n\/?a|none|unknown|tbd|-+|\.+)$/i.test(v) && v.toLowerCase() !== title.toLowerCase()),
     ),
   ];
   const rating = extractAsuraRating(row);

@@ -119,6 +119,8 @@ export default function BookmarksView() {
   // Bookmark Detail Modal state & chapter cache
   const [modalItem, setModalItem] = useState<Item | null>(null);
   const [modalChapNum, setModalChapNum] = useState<number>(1);
+  const [editingChapNum, setEditingChapNum] = useState<boolean>(false);
+  const [chapInputVal, setChapInputVal] = useState<string>("1");
   const [modalChapters, setModalChapters] = useState<ChapterSummary[]>([]);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveMessage, setSaveMessage] = useState<string>("");
@@ -206,7 +208,14 @@ export default function BookmarksView() {
         d
           ? {
               ...d,
-              total: d.total - 1,
+              total: Math.max(0, d.total - 1),
+              counts: {
+                ...d.counts,
+                ...(typeof d.counts.ALL === "number" ? { ALL: Math.max(0, d.counts.ALL - 1) } : {}),
+                ...(typeof d.counts[it.status] === "number"
+                  ? { [it.status]: Math.max(0, d.counts[it.status] - 1) }
+                  : {}),
+              },
               items: d.items.filter((x) => x.comic.id !== it.comic.id),
             }
           : d,
@@ -326,10 +335,31 @@ export default function BookmarksView() {
           }
         }
       } else {
-        targetChapter =
-          chapters.find((ch) => Math.abs(ch.number - targetMode.number) < 0.001) ??
-          chapters[Math.min(chapters.length - 1, Math.max(0, targetMode.number - 1))] ??
-          null;
+        if (chapters.length > 0) {
+          targetChapter =
+            chapters.find(
+              (ch) =>
+                Math.abs(ch.number - targetMode.number) < 0.001 ||
+                Number.parseFloat(ch.displayNumber ?? "") === targetMode.number,
+            ) ??
+            chapters.reduce((best, ch) =>
+              Math.abs(ch.number - targetMode.number) < Math.abs(best.number - targetMode.number)
+                ? ch
+                : best,
+            );
+        } else if (it.comic.latestChapter && targetMode.number === it.comic.latestChapter.number) {
+          targetChapter = {
+            id: it.comic.latestChapter.id,
+            number: it.comic.latestChapter.number,
+            displayNumber: it.comic.latestChapter.displayNumber,
+          };
+        } else if (it.progress.current) {
+          targetChapter = {
+            id: it.progress.current.chapterId,
+            number: targetMode.number,
+            displayNumber: String(targetMode.number),
+          };
+        }
       }
 
       if (!targetChapter || !targetChapter.id) {
@@ -339,6 +369,7 @@ export default function BookmarksView() {
       const resolvedNum = targetChapter.number;
       const resolvedDisplay = targetChapter.displayNumber ?? String(resolvedNum);
       setModalChapNum(resolvedNum);
+      setChapInputVal(String(resolvedNum));
 
       // Persist both reading history position and read-chapter record using the real chapterId
       await act("/user/progress", "POST", {
@@ -417,7 +448,13 @@ export default function BookmarksView() {
   };
 
   const counts = data?.counts ?? {};
-  const total = data ? Object.values(counts).reduce((a, b) => a + b, 0) : 0;
+  const total = data
+    ? typeof counts.ALL === "number"
+      ? counts.ALL
+      : Object.entries(counts)
+          .filter(([k]) => k !== "ALL")
+          .reduce((a, [, b]) => a + b, 0)
+    : 0;
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
   const filtered = tab !== "ALL" || dq.length > 0;
 
@@ -456,7 +493,10 @@ export default function BookmarksView() {
     setSaveMessage("");
     setErr("");
     const curNum = it.progress.current?.number ?? it.progress.readCount ?? 0;
-    setModalChapNum(curNum > 0 ? curNum : 1);
+    const initNum = curNum > 0 ? curNum : 1;
+    setModalChapNum(initNum);
+    setChapInputVal(String(initNum));
+    setEditingChapNum(false);
     const cached = chaptersCacheRef.current.get(it.comic.id);
     if (cached) {
       setModalChapters(cached);
@@ -872,9 +912,73 @@ export default function BookmarksView() {
               >
                 −
               </button>
-              <span className="bmm-chap-text">
-                Chapter {modalChapNum} / {modalItem.comic.totalChapters}
-              </span>
+              {editingChapNum ? (
+                <form
+                  className="bmm-chap-edit-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setEditingChapNum(false);
+                    const parsed = Number.parseFloat(chapInputVal);
+                    if (Number.isFinite(parsed)) {
+                      const clamped = Math.min(maxModalChapterNum, Math.max(minModalChapterNum, parsed));
+                      setChapInputVal(String(clamped));
+                      if (clamped !== modalChapNum) {
+                        void saveChapterSelection(modalItem, { type: "number", number: clamped });
+                      }
+                    } else {
+                      setChapInputVal(String(modalChapNum));
+                    }
+                  }}
+                >
+                  <span className="bmm-chap-prefix">Ch.</span>
+                  <input
+                    type="number"
+                    min={minModalChapterNum}
+                    max={maxModalChapterNum}
+                    step="any"
+                    value={chapInputVal}
+                    autoFocus
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) => setChapInputVal(e.target.value)}
+                    onBlur={() => {
+                      setEditingChapNum(false);
+                      const parsed = Number.parseFloat(chapInputVal);
+                      if (Number.isFinite(parsed)) {
+                        const clamped = Math.min(maxModalChapterNum, Math.max(minModalChapterNum, parsed));
+                        setChapInputVal(String(clamped));
+                        if (clamped !== modalChapNum) {
+                          void saveChapterSelection(modalItem, { type: "number", number: clamped });
+                        }
+                      } else {
+                        setChapInputVal(String(modalChapNum));
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setEditingChapNum(false);
+                        setChapInputVal(String(modalChapNum));
+                      }
+                    }}
+                    aria-label="Edit chapter number"
+                    className="bmm-chap-input"
+                  />
+                  <span className="bmm-chap-suffix">/ {modalItem.comic.totalChapters}</span>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  className="bmm-chap-text bmm-chap-trigger"
+                  title="Click to type a chapter number"
+                  onClick={() => {
+                    if (modalItem.comic.totalChapters <= 0) return;
+                    setChapInputVal(String(modalChapNum));
+                    setEditingChapNum(true);
+                  }}
+                >
+                  Chapter {modalChapNum} / {modalItem.comic.totalChapters}
+                </button>
+              )}
               <button
                 type="button"
                 className="bmm-circle-btn"

@@ -53,36 +53,39 @@ export default async function BrowsePage({ searchParams }: { searchParams: Brows
         sort={searchParams.sort}
       />
 
-      {pages > 1 && (
-        <nav aria-label="Pagination" className="pag">
-          <Link
-            href={href({ page: String(Math.max(1, page - 1)) })}
-            aria-disabled={page <= 1}
-            className="pg"
-            style={page <= 1 ? { pointerEvents: "none", opacity: 0.4 } : undefined}
-          >
-            ‹
-          </Link>
-          {Array.from({ length: Math.min(pages, 7) }, (_, i) => i + 1).map((n) => (
+      {pages > 1 && (() => {
+        const winStart = Math.max(1, Math.min(page - 2, Math.max(1, pages - 4)));
+        const winEnd = Math.min(pages, winStart + 4);
+        const pageNums = Array.from({ length: winEnd - winStart + 1 }, (_, i) => winStart + i);
+        return (
+          <nav aria-label="Pagination" className="pag">
             <Link
-              key={n}
-              href={href({ page: String(n) })}
-              aria-current={n === page ? "page" : undefined}
-              className={`pg ${n === page ? "on" : ""}`}
+              href={href({ page: String(Math.max(1, page - 1)) })}
+              aria-disabled={page <= 1}
+              className={`pg${page <= 1 ? " disabled" : ""}`}
             >
-              {n}
+              ‹
             </Link>
-          ))}
-          <Link
-            href={href({ page: String(Math.min(pages, page + 1)) })}
-            aria-disabled={page >= pages}
-            className="pg"
-            style={page >= pages ? { pointerEvents: "none", opacity: 0.4 } : undefined}
-          >
-            ›
-          </Link>
-        </nav>
-      )}
+            {pageNums.map((n) => (
+              <Link
+                key={n}
+                href={href({ page: String(n) })}
+                aria-current={n === page ? "page" : undefined}
+                className={`pg${n === page ? " on" : ""}`}
+              >
+                {n}
+              </Link>
+            ))}
+            <Link
+              href={href({ page: String(Math.min(pages, page + 1)) })}
+              aria-disabled={page >= pages}
+              className={`pg${page >= pages ? " disabled" : ""}`}
+            >
+              ›
+            </Link>
+          </nav>
+        );
+      })()}
     </div>
   );
 }

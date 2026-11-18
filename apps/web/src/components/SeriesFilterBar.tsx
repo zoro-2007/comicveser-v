@@ -148,7 +148,17 @@ export default function SeriesFilterBar({
     return items.filter((c) => !lib.isBookmarked(c.id));
   }, [items, hideBookmarked, lib]);
 
-  const displayCount = hideBookmarked ? visibleItems.length : totalCount;
+  const hiddenBookmarkTotal = useMemo(() => {
+    const activeType = lockTypeToManga ? "MANGA" : type ? type.toUpperCase() : "";
+    if (!activeType) return lib.bookmarkedItems.length;
+    return lib.bookmarkedItems.filter((b) => b.type === activeType).length;
+  }, [lib.bookmarkedItems, lockTypeToManga, type]);
+
+  const displayCount = hideBookmarked
+    ? totalCount <= items.length
+      ? visibleItems.length
+      : Math.max(visibleItems.length, totalCount - hiddenBookmarkTotal)
+    : totalCount;
 
   const hasActiveFilters = Boolean(
     q ||
