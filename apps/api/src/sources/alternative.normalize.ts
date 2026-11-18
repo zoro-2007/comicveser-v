@@ -389,6 +389,7 @@ export function buildAlternativeSourceMatch(
     coverUrl: matchedItem.coverUrl,
     sourceUrl: matchedItem.sourceUrl,
     catalogUrl: `/sources/${encodeURIComponent(altSourceId)}/${encodeURIComponent(matchedItem.externalId)}`,
+    adminReviewUrl: `/admin/sources/${encodeURIComponent(altSourceId)}/${encodeURIComponent(matchedItem.externalId)}`,
     language,
     totalChapters: chRes.total,
     chapters,

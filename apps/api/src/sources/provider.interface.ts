@@ -63,6 +63,7 @@ export interface AlternativeSourceMatch {
   sourceUrl: string;
   catalogUrl: string;
   adminReviewUrl: string;
+  language?: string;
   totalChapters: number;
   chapters: AlternativeChapterItem[];
   matchedChapter?: AlternativeChapterItem | null;
