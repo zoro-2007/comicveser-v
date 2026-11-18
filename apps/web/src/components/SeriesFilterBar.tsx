@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ComicCard from "./ComicCard";
+import { useLibrary } from "./LibraryProvider";
 import RequestComicModal from "./RequestComicModal";
-import { api } from "@/lib/api";
 import {
   Comic,
   GenreOption,
@@ -58,8 +58,8 @@ export default function SeriesFilterBar({
   const [searchValue, setSearchValue] = useState(q);
   const [creatorValue, setCreatorValue] = useState(creator);
   const [genreSearch, setGenreSearch] = useState("");
+  const lib = useLibrary();
   const [hideBookmarked, setHideBookmarked] = useState(hideBookmarkedInitial);
-  const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(new Set());
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,28 +69,6 @@ export default function SeriesFilterBar({
   useEffect(() => {
     setCreatorValue(creator);
   }, [creator]);
-
-  // Fetch user's bookmarked comic IDs when Hide Bookmarked is toggled on
-  useEffect(() => {
-    if (!hideBookmarked) return;
-    let alive = true;
-    api<Array<{ comicId?: string; comic?: { id: string } }>>("/user/bookmarks", { credentials: "include" })
-      .then((rows) => {
-        if (!alive || !Array.isArray(rows)) return;
-        const ids = new Set<string>();
-        for (const r of rows) {
-          const id = r.comic?.id ?? r.comicId;
-          if (id) ids.add(id);
-        }
-        setBookmarkedIds(ids);
-      })
-      .catch(() => {
-        if (alive) setBookmarkedIds(new Set());
-      });
-    return () => {
-      alive = false;
-    };
-  }, [hideBookmarked]);
 
   // Close desktop popovers when clicking outside
   useEffect(() => {
@@ -166,11 +144,11 @@ export default function SeriesFilterBar({
   }, [availableGenres, genreSearch]);
 
   const visibleItems = useMemo(() => {
-    if (!hideBookmarked || bookmarkedIds.size === 0) return items;
-    return items.filter((c) => !bookmarkedIds.has(c.id));
-  }, [items, hideBookmarked, bookmarkedIds]);
+    if (!hideBookmarked) return items;
+    return items.filter((c) => !lib.isBookmarked(c.id));
+  }, [items, hideBookmarked, lib]);
 
-  const displayCount = hideBookmarked && bookmarkedIds.size > 0 ? visibleItems.length : totalCount;
+  const displayCount = hideBookmarked ? visibleItems.length : totalCount;
 
   const hasActiveFilters = Boolean(
     q ||

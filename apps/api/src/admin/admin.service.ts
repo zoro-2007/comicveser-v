@@ -675,7 +675,7 @@ export class AdminService {
           const perm = await (tx as any).permission.upsert({
             where: { key },
             update: {},
-            create: { key, description: key },
+            create: { key },
           });
           permConnect.push({ id: perm.id });
         }
