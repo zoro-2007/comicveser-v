@@ -9,7 +9,7 @@ import type {
   SearchResponse,
 } from "./provider.interface";
 import { elements, htmlText, metaContent, voidElements } from "./html";
-import { lookupCuratedSeriesMetadata } from "./known-metadata";
+import { filterValidComicGenres, lookupCuratedSeriesMetadata } from "./known-metadata";
 
 const SITE = "https://weebcentral.com";
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
@@ -88,7 +88,7 @@ export function extractWeebCentralGenres(markup: string): string[] {
   const out: string[] = [];
   const add = (raw: string | null | undefined) => {
     if (!raw) return;
-    for (const part of raw.split(/[,;•·|/]+/)) {
+    for (const part of raw.split(/[,;•·|]+/)) {
       const g = cleanGenreToken(part);
       if (!g) continue;
       const key = g.toLowerCase();
@@ -98,7 +98,31 @@ export function extractWeebCentralGenres(markup: string): string[] {
     }
   };
 
-  // 1. Links to included_tag / genre / tag routes (both anchor text and URL query value)
+  // 1. First extract from explicit <strong>Tags(s):</strong> / <strong>Genres:</strong> section on WeebCentral series page
+  const strongTagRegex =
+    /<strong[^>]*>\s*(?:tags?(?:\(s\))?|genres?(?:\(s\))?|categor(?:y|ies))\s*:?\s*<\/strong>\s*([\s\S]*?)(?=<strong\b|<\/li>|<\/div>|<\/p>|<\/section>|<\/article>|$)/gi;
+  for (const match of markup.matchAll(strongTagRegex)) {
+    const body = match[1] ?? "";
+    const links = elements(body, "a");
+    if (links.length > 0) {
+      for (const link of links) add(link.innerHtml);
+    } else {
+      const spans = elements(body, "span");
+      if (spans.length > 0) {
+        for (const s of spans) add(s.innerHtml);
+      } else {
+        add(body);
+      }
+    }
+  }
+
+  // If the explicit Tags(s) section yielded valid WeebCentral genres, return them immediately without scanning full-page links
+  const explicitValid = filterValidComicGenres(out);
+  if (explicitValid.length > 0) {
+    return explicitValid;
+  }
+
+  // 2. Fallback: Links to included_tag / genre / tag routes (for search result cards without <strong>Tags(s):</strong>)
   for (const anchor of elements(markup, "a")) {
     const href = anchor.attrs.href ?? "";
     if (/included_tag=/i.test(href) || /[?&](?:genre|tag)s?=/i.test(href) || /\/(?:genres?|tags?)\//i.test(href)) {
@@ -114,31 +138,12 @@ export function extractWeebCentralGenres(markup: string): string[] {
     }
   }
 
-  // Also scan raw included_tag= occurrences in markup in case of nested tags inside <a>
   for (const m of markup.matchAll(/[?&]included_tag=([^&#"'\s>]+)/gi)) {
     if (m[1]) {
       try {
         add(decodeURIComponent(m[1].replace(/\+/g, " ")));
       } catch {
         add(m[1].replace(/\+/g, " "));
-      }
-    }
-  }
-
-  // 2. Any <strong>Tags(s):</strong> / <strong>Genres:</strong> / <strong>Categories:</strong> section regardless of wrapper tag
-  const strongTagRegex =
-    /<strong[^>]*>\s*(?:tags?(?:\(s\))?|genres?(?:\(s\))?|categor(?:y|ies))\s*:?\s*<\/strong>\s*([\s\S]*?)(?=<strong\b|<\/li>|<\/div>|<\/p>|<\/section>|<\/article>|$)/gi;
-  for (const match of markup.matchAll(strongTagRegex)) {
-    const body = match[1] ?? "";
-    const links = elements(body, "a");
-    if (links.length > 0) {
-      for (const link of links) add(link.innerHtml);
-    } else {
-      const spans = elements(body, "span");
-      if (spans.length > 0) {
-        for (const s of spans) add(s.innerHtml);
-      } else {
-        add(body);
       }
     }
   }
@@ -162,7 +167,7 @@ export function extractWeebCentralGenres(markup: string): string[] {
     }
   }
 
-  return out;
+  return filterValidComicGenres(out);
 }
 
 export function extractWeebCentralRating(markup: string): number | null {

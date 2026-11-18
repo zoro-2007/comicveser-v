@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
@@ -61,7 +61,7 @@ const PAGE = 20;
 
 /**
  * Asura Messages & Notifications View (#frame-messages & #frame-mobile-messages):
- * Renders chapter notifications in the exact image_b7315e.png style (Comic cover + bold title + purple "New: Chapter X")
+ * Renders chapter and admin alert notifications with their comic cover thumbnails
  * and includes the 2-column thread + conversation layout for Messages.
  */
 export default function NotificationsView(props?: {
@@ -98,6 +98,7 @@ export default function NotificationsView(props?: {
   const [msg, setMsg] = useState("");
   const [activeThreadIdx, setActiveThreadIdx] = useState(0);
   const [quickMsg, setQuickMsg] = useState("");
+  const fetchedTitlesRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let active = true;
@@ -126,6 +127,59 @@ export default function NotificationsView(props?: {
       active = false;
     };
   }, []);
+
+  // Dynamically fetch covers for any notification whose comic wasn't in the initial 48 popular comics
+  useEffect(() => {
+    const combined = [...items, ...adminAlerts];
+    if (!combined.length) return;
+    let active = true;
+    const missingTitles: string[] = [];
+    for (const n of combined) {
+      const info = parseNotifDisplay(n, comicLookup);
+      if (!info.coverUrl && info.comicTitle && info.comicTitle !== n.title) {
+        const key = info.comicTitle.toLowerCase();
+        if (!fetchedTitlesRef.current.has(key)) {
+          fetchedTitlesRef.current.add(key);
+          missingTitles.push(info.comicTitle);
+        }
+      }
+    }
+    if (!missingTitles.length) return;
+
+    Promise.all(
+      missingTitles.slice(0, 12).map((t) =>
+        api<{ items: ApiComic[] }>(`/comics?q=${encodeURIComponent(t)}&pageSize=5`, {
+          cache: "no-store",
+        }).catch(() => ({ items: [] })),
+      ),
+    ).then((results) => {
+      if (!active) return;
+      setComicLookup((prev) => {
+        const next = new Map(prev);
+        for (const res of results) {
+          for (const raw of res.items ?? []) {
+            const c = toComic(raw);
+            if (!c.coverUrl) continue;
+            const entry = { title: c.title, slug: c.slug, coverUrl: c.coverUrl };
+            next.set(c.id.toLowerCase(), entry);
+            next.set(c.slug.toLowerCase(), entry);
+            next.set(c.title.toLowerCase(), entry);
+            next.set(
+              c.title
+                .toLowerCase()
+                .replace(/^official\s+/i, "")
+                .replace(/[^a-z0-9]+/g, ""),
+              entry,
+            );
+          }
+        }
+        return next;
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [items, adminAlerts, comicLookup]);
 
   const load = useCallback(
     async (pg: number, replace: boolean) => {
@@ -608,43 +662,52 @@ export default function NotificationsView(props?: {
                   {adminAlerts.map((alert) => {
                     const m = alert.meta ?? {};
                     const isFailed = m.status === "FAILED" || alert.title.includes("failed");
+                    const alertInfo = parseNotifDisplay(alert, comicLookup);
                     return (
-                      <div key={alert.id} className="svc-alert space-y-1.5">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className={`tag ${isFailed ? "red" : "green"}`}>
-                              {isFailed ? "Failed" : "Successfully Published"}
-                            </span>
-                            {m.providerName && <span className="tag purple">{m.providerName}</span>}
-                            <strong className="text-white">{alert.title}</strong>
+                      <div key={alert.id} className="svc-alert flex gap-3 items-start">
+                        <Cover
+                          hue={hueOf(alertInfo.hueKey)}
+                          title={alertInfo.comicTitle}
+                          src={alertInfo.coverUrl}
+                          className="np-thumb shrink-0 border-0 !p-0.5"
+                        />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={`tag ${isFailed ? "red" : "green"}`}>
+                                {isFailed ? "Failed" : "Successfully Published"}
+                              </span>
+                              {m.providerName && <span className="tag purple">{m.providerName}</span>}
+                              <strong className="text-white">{alert.title}</strong>
+                            </div>
+                            <span style={{ color: "var(--muted)" }}>{timeAgo(alert.createdAt)}</span>
                           </div>
-                          <span style={{ color: "var(--muted)" }}>{timeAgo(alert.createdAt)}</span>
-                        </div>
-                        <p style={{ color: "var(--muted)", margin: 0 }}>{alert.body}</p>
-                        <div className="flex flex-wrap items-center gap-4 pt-1 font-semibold">
-                          {alert.href && (
-                            <Link href={alert.href} style={{ color: "var(--purple-2)" }}>
-                              Open ComicVerse Chapter →
-                            </Link>
-                          )}
-                          {m.comicId && (
-                            <Link
-                              href={`/admin/chapters?comicId=${encodeURIComponent(m.comicId)}`}
-                              className="text-white hover:underline"
-                            >
-                              Manage Comic Chapters
-                            </Link>
-                          )}
-                          {m.sourceUrl && (
-                            <a
-                              href={m.sourceUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ color: "var(--muted)" }}
-                            >
-                              Source Comic ↗
-                            </a>
-                          )}
+                          <p style={{ color: "var(--muted)", margin: 0 }}>{alert.body}</p>
+                          <div className="flex flex-wrap items-center gap-4 pt-1 font-semibold">
+                            {alert.href && (
+                              <Link href={alert.href} style={{ color: "var(--purple-2)" }}>
+                                Open ComicVerse Chapter →
+                              </Link>
+                            )}
+                            {m.comicId && (
+                              <Link
+                                href={`/admin/chapters?comicId=${encodeURIComponent(m.comicId)}`}
+                                className="text-white hover:underline"
+                              >
+                                Manage Comic Chapters
+                              </Link>
+                            )}
+                            {m.sourceUrl && (
+                              <a
+                                href={m.sourceUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: "var(--muted)" }}
+                              >
+                                Source Comic ↗
+                              </a>
+                            )}
+                          </div>
                         </div>
                       </div>
                     );

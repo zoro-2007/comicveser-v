@@ -1,13 +1,13 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
-import { UserRound } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useAuth } from "./AuthProvider";
 import { Cover } from "./ComicCard";
 import { ComicVerseLogo } from "./ComicVerseLogo";
 import { UserAvatar } from "./ProfileMenu";
+import { api } from "@/lib/api";
 import { act, useLoad } from "@/lib/useApi";
-import { timeAgo } from "@/lib/comics";
+import { ApiComic, timeAgo, toComic } from "@/lib/comics";
 import { coverSrc, hueOf } from "@/lib/media";
 
 type Profile = { avatarUrl: string | null; bio: string | null; createdAt: string };
@@ -18,7 +18,7 @@ type Stats = {
   shelves: Record<string, number>;
 };
 type Hist = {
-  comic: { id: string; slug: string; title: string };
+  comic: { id: string; slug: string; title: string; coverUrl?: string | null };
   chapter: { id: string; displayNumber?: string; number: number };
   imageIndex: number;
   lastReadAt: string;
@@ -30,7 +30,7 @@ type Marks = {
   }[];
 };
 type ReadRows = {
-  comic: { slug: string; title: string };
+  comic: { slug: string; title: string; coverUrl?: string | null };
   chapter: { id: string; displayNumber: string };
   readAt: string;
 }[];
@@ -38,20 +38,56 @@ type Notes = { prefs: { newChapter: boolean } };
 
 /**
  * Asura Reader Profile Page (#frame-profile & #frame-mobile-profile):
- * Purple banner (.acct-banner), overlapping avatar (.acct-head), ADMIN/role badge (.pm-badge),
+ * Purple banner (.acct-banner), overlapping avatar (.acct-head), ADMIN/role badge (.pm-badge / .pm-badge.red-admin),
  * 3-column stats (.acct-stats), Overview / Completed switcher, Favourites / Bookmarks cover strip (.fav-row),
- * and Activity list.
+ * and Activity list with comic cover images.
  */
 export default function AccountDashboard() {
-  const { user, status } = useAuth();
+  const { user, status, isDelegatedAdmin } = useAuth();
   const [viewTab, setViewTab] = useState<"overview" | "completed">("overview");
+  const [coverFallbackMap, setCoverFallbackMap] = useState<Map<string, string>>(new Map());
   const q = (p: string) => (user ? p : null);
   const profile = useLoad<Profile>(q("/user/profile"));
   const stats = useLoad<Stats>(q("/user/stats"));
   const history = useLoad<Hist>(q("/user/history"));
-  const marks = useLoad<Marks>(q("/user/bookmarks?limit=8&sort=updated"));
+  const marks = useLoad<Marks>(q("/user/bookmarks?limit=24&sort=updated"));
   const reads = useLoad<ReadRows>(q("/user/read-chapters"));
   const notes = useLoad<Notes>(q("/user/notifications"));
+
+  // Build a fallback cover lookup in case an older API response omits coverUrl on a history entry
+  useEffect(() => {
+    const items = history.data ?? [];
+    if (!items.length) return;
+    const missing = items.filter((h) => !h.comic.coverUrl);
+    if (!missing.length) return;
+    let alive = true;
+    Promise.all(
+      missing.slice(0, 6).map((h) =>
+        api<{ items: ApiComic[] }>(`/comics?q=${encodeURIComponent(h.comic.title)}&pageSize=3`, {
+          cache: "no-store",
+        }).catch(() => ({ items: [] })),
+      ),
+    ).then((results) => {
+      if (!alive) return;
+      setCoverFallbackMap((prev) => {
+        const next = new Map(prev);
+        for (const r of results) {
+          for (const raw of r.items ?? []) {
+            const c = toComic(raw);
+            if (c.coverUrl) {
+              next.set(c.id.toLowerCase(), c.coverUrl);
+              next.set(c.slug.toLowerCase(), c.coverUrl);
+              next.set(c.title.toLowerCase(), c.coverUrl);
+            }
+          }
+        }
+        return next;
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [history.data]);
 
   if (status === "loading") {
     return (
@@ -99,6 +135,20 @@ export default function AccountDashboard() {
       })}`
     : "Active Member";
 
+  const resolveActivityCover = (c: { id: string; slug: string; title: string; coverUrl?: string | null }) => {
+    if (c.coverUrl) return coverSrc(c.coverUrl);
+    const fromMarks = marks.data?.items.find(
+      (b) => b.comic.id === c.id || b.comic.slug === c.slug,
+    )?.comic.coverUrl;
+    if (fromMarks) return coverSrc(fromMarks);
+    return (
+      coverFallbackMap.get(c.id.toLowerCase()) ??
+      coverFallbackMap.get(c.slug.toLowerCase()) ??
+      coverFallbackMap.get(c.title.toLowerCase()) ??
+      null
+    );
+  };
+
   return (
     <div>
       {/* 1. Asura Profile Banner + Header */}
@@ -115,7 +165,12 @@ export default function AccountDashboard() {
             <span style={{ fontSize: 12, color: "var(--muted)", display: "block" }}>
               {user.email} · {joinedText} ·{" "}
               {roleLabel === "ADMIN" ? (
-                <span className="pm-badge" style={{ margin: "0 0 0 4px" }}>★ {roleLabel}</span>
+                <span
+                  className={`pm-badge${isDelegatedAdmin ? " red-admin" : ""}`}
+                  style={{ margin: "0 0 0 4px" }}
+                >
+                  ★ {roleLabel}
+                </span>
               ) : (
                 <span className="pm-badge user-badge" style={{ margin: "0 0 0 4px" }}>{roleLabel}</span>
               )}
@@ -266,6 +321,7 @@ export default function AccountDashboard() {
                     <Cover
                       hue={hueOf(h.comic.slug)}
                       title={h.comic.title}
+                      src={resolveActivityCover(h.comic)}
                       className="!h-[54px] !w-[40px] rounded-md border-0 !p-0.5"
                     />
                     <div className="u-main">

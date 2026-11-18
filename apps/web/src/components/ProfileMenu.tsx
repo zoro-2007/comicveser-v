@@ -39,11 +39,11 @@ export function UserAvatar({
 
 /**
  * Asura Profile Popup (.profile-menu):
- * Header: 56x56 avatar + username + email + GOLD ADMIN badge.
+ * Header: 56x56 avatar + username + email + ADMIN badge (Gold for Primary Admin, Red for Promoted/Delegated Admin).
  * Items: Admin Panel (compact row for admins only), Profile, Messages, History, Settings — divider — Log out.
  */
 export default function ProfileMenu() {
-  const { user, isAdmin, logout } = useAuth();
+  const { user, isAdmin, isDelegatedAdmin, logout } = useAuth();
   const profile = useLoad<{ avatarUrl: string | null }>(user ? "/user/profile" : null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -84,7 +84,9 @@ export default function ProfileMenu() {
             <span className="pm-name truncate">{user.username}</span>
             <span className="pm-mail truncate">{user.email}</span>
             {roleLabel === "ADMIN" ? (
-              <span className="pm-badge">★ {roleLabel}</span>
+              <span className={`pm-badge${isDelegatedAdmin ? " red-admin" : ""}`}>
+                ★ {roleLabel}
+              </span>
             ) : (
               <span className="pm-badge user-badge">{roleLabel}</span>
             )}

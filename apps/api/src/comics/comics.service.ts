@@ -9,8 +9,11 @@ import { randomUUID } from "crypto";
 import { CreateComicDto, ListComicsQuery, UpdateComicDto, UpdateComicRatingDto } from "./dto/comic.dto";
 import {
   fetchExternalProviderMetadata,
+  filterValidComicGenres,
   isPlaceholderComicDescription,
   lookupCuratedSeriesMetadata,
+  normalizeCanonicalGenreName,
+  purgeNonCanonicalGenresFromDb,
 } from "../sources/known-metadata";
 
 const include = { genres: { include: { genre: true } } } satisfies Prisma.ComicInclude;
@@ -56,11 +59,63 @@ export class ComicsService {
   }
 
   /**
-   * Repairs existing comics in-place (both in memory and in PostgreSQL) when a published comic
-   * is missing its description ("No description provided."), genres, or rating.
+   * Filters a comic row's genres to canonical comic genres (stripping any MangaUpdates trope tags)
+   * and repairs missing description, genres, or rating in-place.
    */
   private async repairComicRowIfNeeded(row: any, allowNetworkLookup = false): Promise<void> {
     if (!row || !row.id || !row.title) return;
+
+    // 1. Strip any non-canonical trope tags from row.genres and from PostgreSQL if polluted
+    if (Array.isArray(row.genres) && row.genres.length > 0) {
+      const originalLen = row.genres.length;
+      const validGenreObjs: Array<{ genre: { id?: string; name: string; slug: string } }> = [];
+      const invalidGenreIds: string[] = [];
+      const seenSlugs = new Set<string>();
+
+      for (const cg of row.genres) {
+        const rawName = typeof cg === "string" ? cg : cg?.genre?.name ?? cg?.name;
+        const gId = cg?.genre?.id ?? cg?.genreId;
+        const canonical = normalizeCanonicalGenreName(rawName);
+        if (!canonical) {
+          if (gId) invalidGenreIds.push(gId);
+          continue;
+        }
+        const gSlug = slugify(canonical);
+        if (seenSlugs.has(gSlug)) continue;
+        seenSlugs.add(gSlug);
+        validGenreObjs.push({
+          ...(typeof cg === "object" ? cg : {}),
+          genre: {
+            ...(typeof cg?.genre === "object" ? cg.genre : {}),
+            name: canonical,
+            slug: gSlug,
+          },
+        });
+      }
+
+      // If this comic had polluted tags (e.g. >10 tags from MU/ComicK) and matches curated WeebCentral metadata, use the exact WeebCentral tags
+      const curatedForClean = lookupCuratedSeriesMetadata(row.title, row.altTitle ? [String(row.altTitle)] : []);
+      if (originalLen > 10 && curatedForClean && curatedForClean.genres.length > 0) {
+        const allowedSlugs = new Set(curatedForClean.genres.map((n) => slugify(n)));
+        const extraIds = validGenreObjs
+          .filter((cg) => !allowedSlugs.has(cg.genre.slug))
+          .map((cg) => cg.genre.id)
+          .filter((id): id is string => Boolean(id));
+        invalidGenreIds.push(...extraIds);
+        row.genres = curatedForClean.genres.map((name) => ({
+          genre: { name, slug: slugify(name) },
+        }));
+      } else {
+        row.genres = validGenreObjs;
+      }
+
+      if (invalidGenreIds.length > 0 && typeof (this.db as any)?.comicGenre?.deleteMany === "function") {
+        void (this.db as any).comicGenre
+          .deleteMany({ where: { comicId: row.id, genreId: { in: invalidGenreIds } } })
+          .catch(() => {});
+      }
+    }
+
     const needsDesc = isPlaceholderComicDescription(row.description, row.title);
     const hasGenres = Array.isArray(row.genres) && row.genres.length > 0;
     const hasRating = typeof row.providerRating === "number" && row.providerRating > 0;
@@ -95,14 +150,15 @@ export class ComicsService {
       patch.type = ComicType.MANHWA;
     }
 
-    if (!hasGenres && meta.genres.length > 0) {
-      row.genres = meta.genres.map((name) => ({
+    const cleanMetaGenres = filterValidComicGenres(meta.genres);
+    if (!hasGenres && cleanMetaGenres.length > 0) {
+      row.genres = cleanMetaGenres.map((name) => ({
         genre: { name, slug: slugify(name) },
       }));
       if (typeof (this.db as any)?.genre?.upsert === "function" && typeof (this.db as any)?.comicGenre?.createMany === "function") {
         try {
           const genreIds: string[] = [];
-          for (const gName of meta.genres) {
+          for (const gName of cleanMetaGenres) {
             const gSlug = slugify(gName);
             if (!gSlug) continue;
             const gRow = await (this.db as any).genre.upsert({
@@ -135,6 +191,7 @@ export class ComicsService {
   // User rating average comes from Rating rows; providerRating is stored separately on the comic/sourceTitle.
   async withRatings<T extends { id: string }>(items: T[]) {
     if (!items.length) return [];
+    void purgeNonCanonicalGenresFromDb(this.db).catch(() => {});
     await Promise.all(items.map((item) => this.repairComicRowIfNeeded(item, false)));
     const g = await this.db.rating.groupBy({ by: ["comicId"], where: { comicId: { in: items.map((i) => i.id) } }, _avg: { value: true }, _count: true });
     const m = new Map(g.map((r) => [r.comicId, r]));

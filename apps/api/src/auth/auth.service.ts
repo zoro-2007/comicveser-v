@@ -63,17 +63,24 @@ export class AuthService {
   private web = () => primaryWebOrigin();
 
   private formatUser(user: any) {
+    const roleName = user.role?.name ?? "USER";
+    const isDelegatedAdmin =
+      roleName === "ADMIN" &&
+      Boolean(user.isDelegatedAdmin === true || (user.profile?.notifyPrefs as any)?.delegatedAdmin === true);
+    const canManageAdmins = roleName === "ADMIN" && !isDelegatedAdmin;
     return {
       id: user.id,
       username: user.username,
       email: user.email,
-      role: user.role?.name ?? "USER",
+      role: roleName,
       permissions: Array.isArray(user.role?.permissions)
         ? user.role.permissions.map((p: { key: string }) => p.key)
         : [],
       emailVerified: Boolean(user.emailVerifiedAt),
       avatarUrl: user.profile?.avatarUrl ?? null,
       authProvider: user.authProvider ?? "local",
+      isDelegatedAdmin,
+      canManageAdmins,
     };
   }
 

@@ -1,4 +1,5 @@
 import { htmlText } from "./html";
+import { slugify } from "../common/util";
 
 export interface KnownSeriesMeta {
   title: string;
@@ -11,6 +12,251 @@ export interface KnownSeriesMeta {
   artist?: string;
   year?: number;
   status?: "ongoing" | "completed" | "hiatus";
+}
+
+/**
+ * Canonical comic/manga/manhwa genres supported by WeebCentral, Asura Scans, and ComicVerse.
+ * Keeps real genres (like WeebCentral's Tags(s): Action, Adventure, Comedy, Drama, Fantasy, Shounen)
+ * while rejecting MangaUpdates/Baka-Updates micro-tags and format descriptors.
+ */
+export const CANONICAL_COMIC_GENRES: readonly string[] = [
+  "Action",
+  "Adventure",
+  "Comedy",
+  "Drama",
+  "Fantasy",
+  "Shounen",
+  "Shoujo",
+  "Seinen",
+  "Josei",
+  "Romance",
+  "Sci-Fi",
+  "Supernatural",
+  "Mystery",
+  "Psychological",
+  "Horror",
+  "Thriller",
+  "Slice of Life",
+  "School Life",
+  "Sports",
+  "Martial Arts",
+  "Mecha",
+  "Historical",
+  "Military",
+  "Music",
+  "Ecchi",
+  "Harem",
+  "Isekai",
+  "Mature",
+  "Adult",
+  "Smut",
+  "Gender Bender",
+  "Yaoi",
+  "Yuri",
+  "Shounen Ai",
+  "Shoujo Ai",
+  "Doujinshi",
+  "One Shot",
+  "Tragedy",
+  "Super Power",
+  "Vampire",
+  "Magic",
+  "Monsters",
+  "Demons",
+  "Ghosts",
+  "Cooking",
+  "Medical",
+  "Police",
+  "Post-Apocalyptic",
+  "Apocalyptic",
+  "Samurai",
+  "Zombies",
+  "Reincarnation",
+  "Regression",
+  "Time Travel",
+  "System",
+  "Dungeon",
+  "Murim",
+  "Wuxia",
+  "Cultivation",
+  "Villainess",
+  "Video Games",
+  "Virtual Reality",
+  "Overpowered",
+  "Necromancer",
+  "Returner",
+  "Delinquents",
+  "Mafia",
+  "Crime",
+  "Philosophical",
+  "Superhero",
+  "Magical Girls",
+  "Reverse Harem",
+  "Survival",
+  "Adaptation",
+  "Webtoon",
+  "Tower",
+  "Hunter",
+  "Academy",
+  "Parody",
+  "Space",
+  "Cyberpunk",
+  "Steampunk",
+  "Mythology",
+  "Detective",
+  "Gaming",
+  "Revenge",
+  "Dark Fantasy",
+  "Urban Fantasy",
+];
+
+const CANONICAL_GENRE_BY_SLUG = new Map<string, string>();
+for (const name of CANONICAL_COMIC_GENRES) {
+  CANONICAL_GENRE_BY_SLUG.set(slugify(name), name);
+}
+
+const GENRE_SYNONYM_BY_SLUG: Record<string, string> = {
+  shonen: "Shounen",
+  shojo: "Shoujo",
+  "sci-fi": "Sci-Fi",
+  scifi: "Sci-Fi",
+  "science-fiction": "Sci-Fi",
+  school: "School Life",
+  "school-life": "School Life",
+  "slice-of-life": "Slice of Life",
+  "martial-art": "Martial Arts",
+  "martial-arts": "Martial Arts",
+  "super-powers": "Super Power",
+  "super-power": "Super Power",
+  superpowers: "Super Power",
+  superpower: "Super Power",
+  "video-game": "Video Games",
+  "video-games": "Video Games",
+  "post-apocalyptic": "Post-Apocalyptic",
+  "boys-love": "Yaoi",
+  "girls-love": "Yuri",
+  "one-shot": "One Shot",
+  oneshot: "One Shot",
+};
+
+export function normalizeCanonicalGenreName(raw?: string | null): string | null {
+  if (!raw || typeof raw !== "string") return null;
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > 35 || /^\d+$/.test(cleaned)) return null;
+  // Reject MangaUpdates / Baka-Updates trope tags containing slashes or character-trope phrases
+  if (cleaned.includes("/")) return null;
+  const slug = slugify(cleaned);
+  if (!slug) return null;
+  if (GENRE_SYNONYM_BY_SLUG[slug]) return GENRE_SYNONYM_BY_SLUG[slug];
+  return CANONICAL_GENRE_BY_SLUG.get(slug) ?? null;
+}
+
+export function isValidComicGenre(raw?: string | null): boolean {
+  return normalizeCanonicalGenreName(raw) !== null;
+}
+
+export function filterValidComicGenres(rawGenres: unknown): string[] {
+  if (!Array.isArray(rawGenres)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawGenres) {
+    const strVal =
+      typeof item === "string"
+        ? item
+        : typeof (item as any)?.genre?.name === "string"
+        ? (item as any).genre.name
+        : typeof (item as any)?.name === "string"
+        ? (item as any).name
+        : null;
+    const canonical = normalizeCanonicalGenreName(strVal);
+    if (!canonical) continue;
+    const slug = slugify(canonical);
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(canonical);
+  }
+  return out;
+}
+
+let lastGenrePurgeAt = 0;
+
+/**
+ * Purges non-canonical MangaUpdates trope tags from Genre, ComicGenre, and SourceTitle.genres
+ * in PostgreSQL so existing live comics (e.g., One Piece, Quest Supremacy) only display real genres.
+ */
+export async function purgeNonCanonicalGenresFromDb(db: any, force = false): Promise<void> {
+  if (!db || typeof db?.genre?.findMany !== "function") return;
+  const now = Date.now();
+  if (!force && now - lastGenrePurgeAt < 60_000) return;
+  lastGenrePurgeAt = now;
+
+  try {
+    const allGenres: Array<{ id: string; name: string; slug: string }> = await db.genre
+      .findMany({ select: { id: true, name: true, slug: true } })
+      .catch(() => []);
+    const invalidIds = allGenres
+      .filter((g) => !isValidComicGenre(g.name) && !isValidComicGenre(g.slug))
+      .map((g) => g.id);
+
+    if (invalidIds.length > 0) {
+      if (typeof db?.comicGenre?.deleteMany === "function") {
+        await db.comicGenre.deleteMany({ where: { genreId: { in: invalidIds } } }).catch(() => {});
+      }
+      if (typeof db?.genre?.deleteMany === "function") {
+        await db.genre.deleteMany({ where: { id: { in: invalidIds } } }).catch(() => {});
+      }
+    }
+
+    // Also clean polluted SourceTitle.genres arrays and repair comics published from WeebCentral
+    if (typeof db?.sourceTitle?.findMany === "function" && typeof db?.sourceTitle?.update === "function") {
+      const sourceTitles: Array<{
+        id: string;
+        sourceId: string;
+        title: string;
+        comicId: string | null;
+        genres: string[];
+      }> = await db.sourceTitle
+        .findMany({
+          where: { comicId: { not: null } },
+          select: { id: true, sourceId: true, title: true, comicId: true, genres: true },
+        })
+        .catch(() => []);
+
+      for (const st of sourceTitles) {
+        if (!Array.isArray(st.genres)) continue;
+        let filtered = filterValidComicGenres(st.genres);
+        const curated = lookupCuratedSeriesMetadata(st.title);
+        // If this title was polluted with >8 tags (from ComicK/MU) and we have curated/WeebCentral tags, use the clean set
+        if (st.sourceId === "weebcentral" && curated && (st.genres.length > 8 || filtered.length === 0)) {
+          filtered = curated.genres;
+        }
+        if (filtered.length !== st.genres.length) {
+          await db.sourceTitle
+            .update({ where: { id: st.id }, data: { genres: filtered } })
+            .catch(() => {});
+        }
+        // If this is a WeebCentral comic whose ComicGenre links were polluted by secondary providers, reset to clean WeebCentral genres
+        if (st.sourceId === "weebcentral" && st.comicId && filtered.length > 0 && invalidIds.length > 0) {
+          try {
+            const targetGenreRows = await db.genre.findMany({
+              where: { slug: { in: filtered.map((n) => slugify(n)) } },
+              select: { id: true },
+            });
+            const validTargetIds = targetGenreRows.map((g: { id: string }) => g.id);
+            if (validTargetIds.length > 0 && typeof db?.comicGenre?.deleteMany === "function") {
+              await db.comicGenre.deleteMany({
+                where: { comicId: st.comicId, genreId: { notIn: validTargetIds } },
+              });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  } catch {
+    // Safe no-op in unit test mocks
+  }
 }
 
 export function normalizeSeriesLookupKey(raw?: string | null): string {
@@ -71,7 +317,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["Quest Supremacy", "퀘스트지상주의"],
     description:
       "Kim Soohyun is an ordinary high school student at the bottom of the school hierarchy who has no talent for studying, fighting, or being attractive. Suddenly, a mysterious quest window appears right in front of his eyes, granting him supernatural rewards for completing quests as he sets out to unite Gangbuk.",
-    genres: ["Action", "Comedy", "Drama", "School Life", "Supernatural"],
+    genres: ["Action", "Comedy", "Drama", "Fantasy", "Martial Arts", "School Life", "Supernatural"],
     rating: 8.8,
     contentType: "manhwa",
     author: "PTJ Comics, YuNuni",
@@ -97,7 +343,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["ブリーチ", "Bleach: Thousand-Year Blood War"],
     description:
       "Ichigo Kurosaki is a teenager gifted with the ability to see spirits. His life is forever changed when he meets Rukia Kuchiki, a Soul Reaper battling evil spirits known as Hollows. After Rukia is gravely injured defending Ichigo's family, she transfers her Soul Reaper powers to him, drawing Ichigo into the vast supernatural conflicts of Soul Society, Hueco Mundo, and the Wandenreich.",
-    genres: ["Action", "Adventure", "Fantasy", "Supernatural"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen", "Supernatural"],
     rating: 9.0,
     contentType: "manga",
     author: "Tite Kubo",
@@ -110,7 +356,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["フェアリーテイル"],
     description:
       "In the magical kingdom of Fiore, young celestial wizard Lucy Heartfilia dreams of joining the legendary—and notoriously destructive—Fairy Tail wizards' guild. When she crosses paths with Natsu Dragneel, a fire-breathing Dragon Slayer searching for his foster father Igneel, and his flying cat Happy, she is swept into a grand adventure alongside Erza Scarlet and Gray Fullbuster.",
-    genres: ["Action", "Adventure", "Comedy", "Fantasy"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen"],
     rating: 8.6,
     contentType: "manga",
     author: "Hiro Mashima",
@@ -120,10 +366,10 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
   },
   {
     title: "One Piece",
-    aliases: ["ワンピース"],
+    aliases: ["ワンピース", "Ван Пис"],
     description:
       "Gol D. Roger, the King of the Pirates, ignited the Great Pirate Era with his final words revealing the existence of the ultimate treasure, the One Piece, hidden on the Grand Line. Monkey D. Luffy, a boy whose body gained the properties of rubber after eating the Gum-Gum Devil Fruit, sets sail with his Straw Hat Pirates crew to brave the seas and become the next King of the Pirates.",
-    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen"],
     rating: 9.6,
     contentType: "manga",
     author: "Eiichiro Oda",
@@ -187,7 +433,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     title: "The Greatest Estate Developer",
     aliases: ["The World's Best Engineer", "역대급 영지 설계사"],
     description:
-      "When civil engineering student Kim Suho falls asleep reading a fantasy novel, he wakes up as Lloyd Frontera, a lazy noble son deep in debt. Armed with modern engineering knowledge and amagical construction system, Lloyd sets out to rebuild his family's territory and secure a wealthy, peaceful life.",
+      "When civil engineering student Kim Suho falls asleep reading a fantasy novel, he wakes up as Lloyd Frontera, a lazy noble son deep in debt. Armed with modern engineering knowledge and a magical construction system, Lloyd sets out to rebuild his family's territory and secure a wealthy, peaceful life.",
     genres: ["Action", "Adventure", "Comedy", "Fantasy", "Reincarnation"],
     rating: 9.6,
     contentType: "manhwa",
@@ -253,7 +499,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["呪術廻戦"],
     description:
       "Yuji Itadori is a high schooler with extraordinary physical strength who swallows a rotting cursed talisman—the finger of Ryomen Sukuna, the King of Curses—to save his friends, becoming Sukuna's host and entering Tokyo Jujutsu High School.",
-    genres: ["Action", "Fantasy", "Horror", "Supernatural"],
+    genres: ["Action", "Fantasy", "Horror", "Shounen", "Supernatural"],
     rating: 9.1,
     contentType: "manga",
     author: "Gege Akutami",
@@ -266,7 +512,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["チェンソーマン"],
     description:
       "Denji is an impoverished young man working off his late father's debt to the yakuza by hunting devils with his chainsaw devil dog, Pochita. Betrayed and killed, Denji merges with Pochita and revives as Chainsaw Man.",
-    genres: ["Action", "Comedy", "Horror", "Supernatural"],
+    genres: ["Action", "Comedy", "Horror", "Shounen", "Supernatural"],
     rating: 9.1,
     contentType: "manga",
     author: "Tatsuki Fujimoto",
@@ -279,7 +525,7 @@ export const CURATED_SERIES_METADATA: KnownSeriesMeta[] = [
     aliases: ["サカモトデイズ"],
     description:
       "Taro Sakamoto was the ultimate hitman, feared by villains and admired by assassins alike. Until one day he fell in love, retired, got married, had a daughter, and opened a quiet neighborhood convenience store—where his past refuses to leave him alone.",
-    genres: ["Action", "Comedy"],
+    genres: ["Action", "Comedy", "Shounen"],
     rating: 9.0,
     contentType: "manga",
     author: "Yuto Suzuki",
@@ -380,7 +626,7 @@ export async function fetchExternalProviderMetadata(
           .replace(/\(Source:[^)]+\)/gi, "")
           .replace(/\[Written by[^\]]+\]/gi, "")
           .trim();
-        const genres = Array.isArray(media.genres) ? media.genres.filter((g: any) => typeof g === "string") : [];
+        const genres = filterValidComicGenres(Array.isArray(media.genres) ? media.genres : []);
         const score = typeof media.averageScore === "number" && media.averageScore > 0
           ? Number((media.averageScore / 10).toFixed(1))
           : null;
@@ -423,12 +669,14 @@ export async function fetchExternalProviderMetadata(
         const desc = String(first.synopsis ?? "")
           .replace(/\[Written by MAL Rewrite\]/gi, "")
           .trim();
-        const genres = [
+        const rawGenres = [
           ...(Array.isArray(first.genres) ? first.genres : []),
           ...(Array.isArray(first.themes) ? first.themes : []),
+          ...(Array.isArray(first.demographics) ? first.demographics : []),
         ]
           .map((g: any) => g?.name)
           .filter((n: any): n is string => typeof n === "string" && n.length > 0);
+        const genres = filterValidComicGenres(rawGenres);
         const score = typeof first.score === "number" && first.score > 0 ? Number(first.score.toFixed(1)) : null;
         const rawType = String(first.type ?? "").toLowerCase();
         const contentType: "manga" | "manhwa" | "manhua" =

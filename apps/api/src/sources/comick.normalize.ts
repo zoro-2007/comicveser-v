@@ -1,5 +1,6 @@
 import { SourceError } from "./provider.interface";
 import type { ChapterItem, ChapterPages, ChaptersResponse, ContentType, MangaDetails, MangaSummary, SearchQuery, SearchResponse } from "./provider.interface";
+import { filterValidComicGenres } from "./known-metadata";
 
 const COMICK_WEB = "https://comick.dev";
 const COMICK_PICTURES = "https://meo.comick.pictures";
@@ -141,15 +142,11 @@ function names(value: unknown): string[] {
 }
 
 export function genresFrom(row: Raw, parent?: Raw): string[] {
-  const muCategories = list(obj(row.mu_comics).mu_comic_categories).map(
-    (entry) => obj(entry).mu_categories ?? entry,
-  );
+  // Never extract mu_comic_categories (MangaUpdates/Baka-Updates character tropes)
   const rawEntries = [
     ...list(row.genres),
     ...list(row.md_comic_md_genres).map((entry) => obj(entry).md_genres ?? entry),
     ...list(row.categories),
-    ...list(row.tags),
-    ...muCategories,
     ...(parent
       ? [
           ...list(parent.genres),
@@ -159,8 +156,7 @@ export function genresFrom(row: Raw, parent?: Raw): string[] {
       : []),
   ];
 
-  const seen = new Set<string>();
-  const out: string[] = [];
+  const candidates: string[] = [];
   for (const entry of rawEntries) {
     const candidate =
       str(entry) ??
@@ -170,14 +166,10 @@ export function genresFrom(row: Raw, parent?: Raw): string[] {
       str(obj(entry).slug);
     if (!candidate) continue;
     const cleaned = candidate.replace(/\s+/g, " ").trim();
-    // Ignore numeric genre IDs returned in some search payloads
     if (!cleaned || /^\d+$/.test(cleaned) || cleaned.length > 50) continue;
-    const key = cleaned.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(cleaned);
+    candidates.push(cleaned);
   }
-  return out;
+  return filterValidComicGenres(candidates);
 }
 
 export function ratingFrom(row: Raw, parent?: Raw): number | null {

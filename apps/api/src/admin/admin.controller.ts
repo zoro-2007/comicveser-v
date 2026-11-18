@@ -21,6 +21,7 @@ import {
   CreatorStatusDto,
   ResolveReportDto,
   SetStatusDto,
+  SetUserRoleDto,
 } from "./dto/admin.dto";
 
 @ApiTags("admin")
@@ -88,8 +89,8 @@ export class AdminController {
 
   @RequirePermission("user:manage")
   @Get("admin/users")
-  users(@Query() q: AdminListQuery) {
-    return this.svc.users(q);
+  users(@CurrentUser() u: AuthUser, @Query() q: AdminListQuery) {
+    return this.svc.users(q, u);
   }
 
   @RequirePermission("user:manage")
@@ -97,6 +98,12 @@ export class AdminController {
   @Put("admin/users/:id/status")
   status(@CurrentUser() u: AuthUser, @Param("id") id: string, @Body() d: SetStatusDto) {
     return this.svc.setUserStatus(id, d.status, u.id);
+  }
+
+  @RequirePermission("user:manage")
+  @Put("admin/users/:id/role")
+  setRole(@CurrentUser() u: AuthUser, @Param("id") id: string, @Body() d: SetUserRoleDto) {
+    return this.svc.setUserRole(id, d.role, u);
   }
 
   @RequirePermission("review:moderate")

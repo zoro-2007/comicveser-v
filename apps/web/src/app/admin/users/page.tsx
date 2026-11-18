@@ -3,20 +3,24 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { UserAvatar } from "@/components/ProfileMenu";
-import { Badge, Pager, State, btnDanger, btnGhost, table } from "@/components/admin/ui";
+import { Badge, Pager, State, btn, btnDanger, btnGhost, table } from "@/components/admin/ui";
 import { act, errMsg, useLoad } from "@/lib/useApi";
 
 /**
  * Asura Admin Users Page (#frame-admin-users):
  * - Reactive pagination via useSearchParams() + local page state so clicking Next/Prev always loads the next page.
- * - Clean mobile card arrangement: Avatar + Username/Email on row 1, and Role + Status + Joined + Suspend button aligned on row 2.
+ * - Primary (Gold-badge) Admins can promote any user into an Admin ("Make Admin") or demote a promoted Admin ("Remove Admin").
+ * - Users promoted to Admin receive a RED "★ ADMIN" badge and have full access to the Admin Panel,
+ *   but CANNOT change any user into Admin (enforced on both API and UI).
  */
 export default function AdminUsers() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, isDelegatedAdmin: myIsDelegated, canManageAdmins: myCanManage } = useAuth();
   const myProfile = useLoad<{ avatarUrl: string | null }>(currentUser ? "/user/profile" : null);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
+  const [roleBusyId, setRoleBusyId] = useState<string | null>(null);
 
   const urlQ = searchParams.get("q") ?? "";
   const urlPage = Math.max(1, Number(searchParams.get("page")) || 1);
@@ -39,10 +43,15 @@ export default function AdminUsers() {
     items: any[];
     page: number;
     pages: number;
+    canManageAdmins?: boolean;
   }>(`/admin/users?${sp.toString()}`);
+
+  const canChangeAdminRoles =
+    Boolean(myCanManage) && !myIsDelegated && data?.canManageAdmins !== false;
 
   const toggle = async (u: any) => {
     setErr("");
+    setNotice("");
     try {
       await act(`/admin/users/${u.id}/status`, "PUT", {
         status: u.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE",
@@ -50,6 +59,28 @@ export default function AdminUsers() {
       reload();
     } catch (e) {
       setErr(errMsg(e));
+    }
+  };
+
+  const toggleAdminRole = async (u: any) => {
+    if (!canChangeAdminRoles) return;
+    const isCurrentlyAdmin = String(u.role ?? "USER").toUpperCase() === "ADMIN";
+    const nextRole = isCurrentlyAdmin ? "USER" : "ADMIN";
+    setErr("");
+    setNotice("");
+    setRoleBusyId(u.id);
+    try {
+      await act(`/admin/users/${u.id}/role`, "PUT", { role: nextRole });
+      setNotice(
+        nextRole === "ADMIN"
+          ? `${u.username} is now an Admin (Red Badge) with Admin Panel access.`
+          : `${u.username} has been changed back to User.`,
+      );
+      reload();
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setRoleBusyId(null);
     }
   };
 
@@ -94,10 +125,20 @@ export default function AdminUsers() {
 
       <div className="a-panel" data-layer="Users Table">
         <h3>Users</h3>
-        <div className="psub">Creators can publish comics; Admins can open this panel.</div>
+        <div className="psub">
+          Creators can publish comics; Admins can open this panel.{" "}
+          {canChangeAdminRoles
+            ? "As Primary Admin, you can promote users to Admin (Red Badge)."
+            : "Promoted Admins (Red Badge) have full Admin Panel access except changing user admin roles."}
+        </div>
         {err && (
           <p role="alert" className="mb-2 text-danger">
             {err}
+          </p>
+        )}
+        {notice && (
+          <p role="status" className="mb-2 text-success">
+            {notice}
           </p>
         )}
         <State loading={loading} error={error} />
@@ -118,6 +159,8 @@ export default function AdminUsers() {
                 {data.items.map((u) => {
                   const roleStr = String(u.role ?? "USER").toUpperCase();
                   const isAdminRole = roleStr === "ADMIN";
+                  const isDelegatedAdmin = Boolean(u.isDelegatedAdmin);
+                  const isPrimaryAdmin = isAdminRole && !isDelegatedAdmin;
                   const isSelf =
                     currentUser &&
                     (u.id === currentUser.id || u.username === currentUser.username);
@@ -153,7 +196,9 @@ export default function AdminUsers() {
                       </td>
                       <td className="u-cell-meta">
                         {isAdminRole ? (
-                          <span className="tag gold">★ {roleStr}</span>
+                          <span className={`tag ${isDelegatedAdmin ? "red" : "gold"}`}>
+                            ★ {roleStr}
+                          </span>
                         ) : (
                           <span className="tag purple">{roleStr}</span>
                         )}
@@ -165,17 +210,35 @@ export default function AdminUsers() {
                         {new Date(u.createdAt).toLocaleDateString("en-IN")}
                       </td>
                       <td className="u-cell-act text-right">
-                        <button
-                          type="button"
-                          className={u.status === "ACTIVE" ? btnDanger : btnGhost}
-                          onClick={() =>
-                            (u.status !== "ACTIVE" ||
-                              confirm(`Suspend ${u.username}? They will be signed out.`)) &&
-                            toggle(u)
-                          }
-                        >
-                          {u.status === "ACTIVE" ? "Suspend" : "Restore"}
-                        </button>
+                        <div className="inline-flex flex-wrap items-center justify-end gap-2">
+                          {canChangeAdminRoles && !isSelf && !isPrimaryAdmin && (
+                            <button
+                              type="button"
+                              disabled={roleBusyId === u.id}
+                              className={isAdminRole ? btnDanger : btn}
+                              onClick={() => void toggleAdminRole(u)}
+                            >
+                              {roleBusyId === u.id
+                                ? "Saving…"
+                                : isAdminRole
+                                ? "Remove Admin"
+                                : "Make Admin"}
+                            </button>
+                          )}
+                          {!isSelf && !isPrimaryAdmin && (
+                            <button
+                              type="button"
+                              className={u.status === "ACTIVE" ? btnDanger : btnGhost}
+                              onClick={() =>
+                                (u.status !== "ACTIVE" ||
+                                  confirm(`Suspend ${u.username}? They will be signed out.`)) &&
+                                toggle(u)
+                              }
+                            >
+                              {u.status === "ACTIVE" ? "Suspend" : "Restore"}
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

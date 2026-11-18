@@ -9,7 +9,14 @@ import {
 } from "@nestjs/common";
 import { ComicType, Prisma, UserStatus } from "@prisma/client";
 import { slugify } from "../common/util";
-import { fetchExternalProviderMetadata, isPlaceholderComicDescription, lookupCuratedSeriesMetadata } from "../sources/known-metadata";
+import {
+  fetchExternalProviderMetadata,
+  filterValidComicGenres,
+  isPlaceholderComicDescription,
+  lookupCuratedSeriesMetadata,
+  normalizeCanonicalGenreName,
+  purgeNonCanonicalGenresFromDb,
+} from "../sources/known-metadata";
 import { createHash, randomUUID } from "crypto";
 import * as yauzl from "yauzl";
 import { PrismaService } from "../prisma/prisma.service";
@@ -18,6 +25,7 @@ import { dimensions, sniff } from "../storage/image";
 import { AdminListQuery, AnnouncementDto, ResolveReportDto } from "./dto/admin.dto";
 import { SourcesService } from "../sources/sources.service";
 import { AuthService } from "../auth/auth.service";
+import { AuthUser } from "../auth/auth.guard";
 import { MailService } from "../mail/mail.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { primaryWebOrigin } from "../common/config";
@@ -28,6 +36,14 @@ const MAX_ZIP_BYTES = 100 * 1024 * 1024,
   MAX_TOTAL = 400 * 1024 * 1024;
 const pg = (page: number) => ({ skip: (page - 1) * SIZE, take: SIZE });
 const bad = (m: string) => new BadRequestException(m);
+
+const ADMIN_PERMISSION_KEYS = [
+  "comic:write",
+  "chapter:write",
+  "user:manage",
+  "review:moderate",
+  "audit:read",
+] as const;
 
 function readZip(buf: Buffer): Promise<{ name: string; data: Buffer }[]> {
   return new Promise((resolve, reject) => {
@@ -221,6 +237,57 @@ export class AdminService {
 
   private async repairAdminComicRowIfNeeded(row: any, allowNetworkLookup = false): Promise<void> {
     if (!row || !row.id || !row.title) return;
+
+    // 1. Strip any non-canonical trope tags from row.genres and from PostgreSQL
+    if (Array.isArray(row.genres) && row.genres.length > 0) {
+      const originalLen = row.genres.length;
+      const validGenreObjs: Array<{ genre: { id?: string; name: string; slug: string } }> = [];
+      const invalidGenreIds: string[] = [];
+      const seenSlugs = new Set<string>();
+
+      for (const cg of row.genres) {
+        const rawName = typeof cg === "string" ? cg : cg?.genre?.name ?? cg?.name;
+        const gId = cg?.genre?.id ?? cg?.genreId;
+        const canonical = normalizeCanonicalGenreName(rawName);
+        if (!canonical) {
+          if (gId) invalidGenreIds.push(gId);
+          continue;
+        }
+        const gSlug = slugify(canonical);
+        if (seenSlugs.has(gSlug)) continue;
+        seenSlugs.add(gSlug);
+        validGenreObjs.push({
+          ...(typeof cg === "object" ? cg : {}),
+          genre: {
+            ...(typeof cg?.genre === "object" ? cg.genre : {}),
+            name: canonical,
+            slug: gSlug,
+          },
+        });
+      }
+
+      const curatedForClean = lookupCuratedSeriesMetadata(row.title, row.altTitle ? [String(row.altTitle)] : []);
+      if (originalLen > 10 && curatedForClean && curatedForClean.genres.length > 0) {
+        const allowedSlugs = new Set(curatedForClean.genres.map((n) => slugify(n)));
+        const extraIds = validGenreObjs
+          .filter((cg) => !allowedSlugs.has(cg.genre.slug))
+          .map((cg) => cg.genre.id)
+          .filter((id): id is string => Boolean(id));
+        invalidGenreIds.push(...extraIds);
+        row.genres = curatedForClean.genres.map((name) => ({
+          genre: { name, slug: slugify(name) },
+        }));
+      } else {
+        row.genres = validGenreObjs;
+      }
+
+      if (invalidGenreIds.length > 0 && typeof (this.db as any)?.comicGenre?.deleteMany === "function") {
+        void (this.db as any).comicGenre
+          .deleteMany({ where: { comicId: row.id, genreId: { in: invalidGenreIds } } })
+          .catch(() => {});
+      }
+    }
+
     const needsDesc = isPlaceholderComicDescription(row.description, row.title);
     const hasGenres = Array.isArray(row.genres) && row.genres.length > 0;
     const hasRating = typeof row.providerRating === "number" && row.providerRating > 0;
@@ -254,14 +321,15 @@ export class AdminService {
       patch.type = ComicType.MANHWA;
     }
 
-    if (!hasGenres && meta.genres.length > 0) {
-      row.genres = meta.genres.map((name) => ({
+    const cleanMetaGenres = filterValidComicGenres(meta.genres);
+    if (!hasGenres && cleanMetaGenres.length > 0) {
+      row.genres = cleanMetaGenres.map((name) => ({
         genre: { name, slug: slugify(name) },
       }));
       if (typeof (this.db as any)?.genre?.upsert === "function" && typeof (this.db as any)?.comicGenre?.createMany === "function") {
         try {
           const genreIds: string[] = [];
-          for (const gName of meta.genres) {
+          for (const gName of cleanMetaGenres) {
             const gSlug = slugify(gName);
             if (!gSlug) continue;
             const gRow = await (this.db as any).genre.upsert({
@@ -292,6 +360,7 @@ export class AdminService {
   }
 
   async comics(q: AdminListQuery) {
+    void purgeNonCanonicalGenresFromDb(this.db).catch(() => {});
     const where: Prisma.ComicWhereInput = {
       deletedAt: null,
       ...(q.state ? { publishState: q.state } : { publishState: { not: "ARCHIVED" } }),
@@ -444,7 +513,36 @@ export class AdminService {
     }
   }
 
-  async users(q: AdminListQuery) {
+  private async isActorDelegatedAdmin(actor: AuthUser | string): Promise<boolean> {
+    if (typeof actor === "object" && actor !== null) {
+      if (actor.isDelegatedAdmin === true || actor.canManageAdmins === false) return true;
+    }
+    const actorId = typeof actor === "string" ? actor : actor?.id;
+    if (!actorId) return false;
+    try {
+      const profile = await this.db.userProfile.findUnique({
+        where: { userId: actorId },
+        select: { notifyPrefs: true },
+      });
+      if ((profile?.notifyPrefs as any)?.delegatedAdmin === true) return true;
+    } catch {
+      // ignore
+    }
+    if (typeof (this.db as any).$queryRawUnsafe === "function") {
+      try {
+        const rows = await this.db.$queryRawUnsafe<{ isDelegatedAdmin: boolean }[]>(
+          `SELECT "isDelegatedAdmin" FROM "User" WHERE "id" = $1 LIMIT 1`,
+          actorId,
+        );
+        if (rows?.[0]?.isDelegatedAdmin === true) return true;
+      } catch {
+        // ignore
+      }
+    }
+    return false;
+  }
+
+  async users(q: AdminListQuery, actor?: AuthUser) {
     const where: Prisma.UserWhereInput = {
       deletedAt: null,
       ...(q.q && {
@@ -468,19 +566,46 @@ export class AdminService {
           emailVerifiedAt: true,
           createdAt: true,
           role: { select: { name: true } },
-          profile: { select: { avatarUrl: true } },
+          profile: { select: { avatarUrl: true, notifyPrefs: true } },
         },
       }),
     ]);
+
+    const delegatedMap = new Map<string, boolean>();
+    if (rows.length > 0 && typeof (this.db as any).$queryRawUnsafe === "function") {
+      try {
+        const ids = rows.map((r) => r.id);
+        const placeholders = ids.map((_, idx) => `$${idx + 1}`).join(", ");
+        const rawFlags = await this.db.$queryRawUnsafe<{ id: string; isDelegatedAdmin: boolean }[]>(
+          `SELECT "id", "isDelegatedAdmin" FROM "User" WHERE "id" IN (${placeholders})`,
+          ...ids,
+        );
+        for (const rf of rawFlags ?? []) {
+          delegatedMap.set(rf.id, Boolean(rf.isDelegatedAdmin));
+        }
+      } catch {
+        // Fallback to notifyPrefs.delegatedAdmin
+      }
+    }
+
+    const actorIsDelegated = actor ? await this.isActorDelegatedAdmin(actor) : false;
+
     return {
-      items: rows.map(({ role, profile, ...u }) => ({
-        ...u,
-        role: role.name,
-        avatarUrl: profile?.avatarUrl ?? null,
-      })),
+      items: rows.map(({ role, profile, ...u }) => {
+        const isDelegatedAdmin =
+          role.name === "ADMIN" &&
+          Boolean(delegatedMap.get(u.id) || (profile?.notifyPrefs as any)?.delegatedAdmin === true);
+        return {
+          ...u,
+          role: role.name,
+          isDelegatedAdmin,
+          avatarUrl: profile?.avatarUrl ?? null,
+        };
+      }),
       total,
       page: q.page,
       pages: Math.max(1, Math.ceil(total / SIZE)),
+      canManageAdmins: !actorIsDelegated,
     };
   }
 
@@ -499,6 +624,133 @@ export class AdminService {
         },
       });
     });
+  }
+
+  /**
+   * Promotes a user to ADMIN (with a red delegated-admin badge and full Admin Panel access)
+   * or demotes a promoted admin back to USER.
+   * Strictly restricted to Primary (Gold-badge) Administrators: a promoted (Red-badge) admin
+   * cannot promote or demote any user into/out of Admin.
+   */
+  async setUserRole(id: string, targetRole: "USER" | "ADMIN", actor: AuthUser) {
+    const actorIsDelegated = await this.isActorDelegatedAdmin(actor);
+    if (actorIsDelegated) {
+      throw new ForbiddenException("Only the primary administrator can change user admin roles.");
+    }
+    if (id === actor.id) {
+      throw new ForbiddenException("You cannot change your own admin role.");
+    }
+
+    const targetUser = await this.db.user.findFirst({
+      where: { id, deletedAt: null },
+      include: { role: true, profile: true },
+    });
+    if (!targetUser) throw new NotFoundException("User not found.");
+
+    // Check if target user is a Primary Admin (cannot be demoted)
+    let targetIsDelegated = Boolean((targetUser.profile?.notifyPrefs as any)?.delegatedAdmin === true);
+    if (!targetIsDelegated && typeof (this.db as any).$queryRawUnsafe === "function") {
+      try {
+        const rows = await this.db.$queryRawUnsafe<{ isDelegatedAdmin: boolean }[]>(
+          `SELECT "isDelegatedAdmin" FROM "User" WHERE "id" = $1 LIMIT 1`,
+          id,
+        );
+        if (rows?.[0]?.isDelegatedAdmin === true) targetIsDelegated = true;
+      } catch {
+        // ignore
+      }
+    }
+
+    if (targetUser.role.name === "ADMIN" && !targetIsDelegated && targetRole === "USER") {
+      throw new ForbiddenException("Cannot remove admin privileges from a primary administrator.");
+    }
+
+    const isPromotingToAdmin = targetRole === "ADMIN";
+
+    await this.db.$transaction(async (tx) => {
+      // Ensure all admin permissions exist and are linked to the ADMIN role so promoted admins have Admin Panel access
+      const permConnect: { id: string }[] = [];
+      if (isPromotingToAdmin && typeof (tx as any).permission?.upsert === "function") {
+        for (const key of ADMIN_PERMISSION_KEYS) {
+          const perm = await (tx as any).permission.upsert({
+            where: { key },
+            update: {},
+            create: { key, description: key },
+          });
+          permConnect.push({ id: perm.id });
+        }
+      }
+
+      const roleRecord = await tx.role.upsert({
+        where: { name: targetRole },
+        update: permConnect.length > 0 ? { permissions: { set: permConnect } } : {},
+        create: {
+          name: targetRole,
+          ...(permConnect.length > 0 ? { permissions: { connect: permConnect } } : {}),
+        },
+      });
+
+      await tx.user.update({
+        where: { id },
+        data: { roleId: roleRecord.id },
+      });
+
+      const currentPrefs =
+        targetUser.profile?.notifyPrefs && typeof targetUser.profile.notifyPrefs === "object"
+          ? (targetUser.profile.notifyPrefs as Record<string, unknown>)
+          : { newChapter: true };
+      const updatedPrefs = {
+        ...currentPrefs,
+        delegatedAdmin: isPromotingToAdmin,
+      };
+
+      await tx.userProfile.upsert({
+        where: { userId: id },
+        update: { notifyPrefs: updatedPrefs as any },
+        create: { userId: id, notifyPrefs: updatedPrefs as any },
+      });
+
+      await tx.notification.create({
+        data: {
+          userId: id,
+          type: "ACCOUNT",
+          title: isPromotingToAdmin ? "Admin Panel access granted" : "Account role updated",
+          body: isPromotingToAdmin
+            ? "An administrator has promoted your account to Admin. You now have access to the Admin Panel."
+            : "Your account role has been updated to Reader (User).",
+          href: isPromotingToAdmin ? "/admin" : "/profile",
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: isPromotingToAdmin ? "user.promote_admin" : "user.demote_admin",
+          resource: "User",
+          resourceId: id,
+          meta: { role: targetRole, isDelegatedAdmin: isPromotingToAdmin },
+        },
+      });
+    });
+
+    if (typeof (this.db as any).$executeRawUnsafe === "function") {
+      try {
+        await this.db.$executeRawUnsafe(
+          `UPDATE "User" SET "isDelegatedAdmin" = $1 WHERE "id" = $2`,
+          isPromotingToAdmin,
+          id,
+        );
+      } catch {
+        // Ignore in unit test mocks
+      }
+    }
+
+    return {
+      ok: true,
+      id,
+      role: targetRole,
+      isDelegatedAdmin: isPromotingToAdmin,
+    };
   }
 
   async reports(queryOrPage: number | AdminListQuery = 1) {

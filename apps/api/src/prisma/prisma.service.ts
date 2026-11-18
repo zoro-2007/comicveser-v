@@ -1,5 +1,6 @@
 import { Global, Injectable, Module, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { purgeNonCanonicalGenresFromDb } from "../sources/known-metadata";
 
 export type SourceRoleValue = "PRIMARY" | "CHAPTER_FALLBACK";
 
@@ -25,12 +26,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         CREATE UNIQUE INDEX IF NOT EXISTS "SourceTitle_comicId_sourceId_key" ON "SourceTitle"("comicId", "sourceId");
       `);
 
-      // Google OAuth & authentication provider columns (preserves all existing users)
+      // Google OAuth, authentication provider, and delegated admin badge columns (preserves all existing users)
       await this.$executeRawUnsafe(`
         ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "googleId" TEXT;
       `);
       await this.$executeRawUnsafe(`
         ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "authProvider" TEXT NOT NULL DEFAULT 'local';
+      `);
+      await this.$executeRawUnsafe(`
+        ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "isDelegatedAdmin" BOOLEAN NOT NULL DEFAULT false;
       `);
       await this.$executeRawUnsafe(`
         CREATE UNIQUE INDEX IF NOT EXISTS "User_googleId_key" ON "User"("googleId");
@@ -121,6 +125,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
             WHERE existing."comicId" = c."id" AND existing."sourceId" = st."sourceId"
           );
       `);
+
+      // Clean any polluted non-canonical genres from live database on startup
+      await purgeNonCanonicalGenresFromDb(this, true).catch(() => {});
     } catch {
       // Standard migration file is also present in prisma/migrations.
     }

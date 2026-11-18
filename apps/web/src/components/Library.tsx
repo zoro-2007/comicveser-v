@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import { Cover } from "./ComicCard";
 import { ApiError, api } from "@/lib/api";
 import { timeAgo } from "@/lib/comics";
-import { hueOf } from "@/lib/media";
+import { coverSrc, hueOf } from "@/lib/media";
 
 interface Row {
   id: string;
   slug: string;
   title: string;
+  coverUrl: string | null;
   chapterLabel: string;
   when: string;
   href: string;
@@ -31,6 +32,7 @@ export default function Library() {
             id: h.comic.id,
             slug: h.comic.slug,
             title: h.comic.title,
+            coverUrl: coverSrc(h.comic.coverUrl) ?? null,
             chapterLabel: `Chapter ${h.chapter.displayNumber ?? h.chapter.number}`,
             when: `page ${h.imageIndex + 1}${h.lastReadAt ? ` · ${timeAgo(h.lastReadAt)}` : ""}`,
             href: `/comics/${h.comic.slug}/chapter/${h.chapter.id}`,
@@ -119,6 +121,7 @@ export default function Library() {
                   <Cover
                     hue={hueOf(r.slug)}
                     title={r.title}
+                    src={r.coverUrl}
                     className="hist-cov border-0 !p-0.5"
                   />
                 </Link>

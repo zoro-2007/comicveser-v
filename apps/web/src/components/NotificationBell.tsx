@@ -18,6 +18,7 @@ export interface PopupNotificationItem {
   href: string | null;
   readAt: string | null;
   createdAt: string;
+  coverUrl?: string | null;
   meta?: {
     adminOnly?: boolean;
     event?: string;
@@ -87,13 +88,14 @@ export function parseNotifDisplay(
 } {
   const chap = isChapterNotif(n);
 
-  // Extract comic title
+  // Extract comic title (including Admin Alert notifications like "[Admin Alert] Chapter synchronization failed: Sword-Devouring Swordmaster")
   let comicTitle = n.meta?.comicTitle?.trim() || "";
   if (!comicTitle) {
     const m1 = n.title.match(/New Chapter Released!\s*[—:-]\s*(.+)$/i);
     const m2 = n.title.match(/New chapter automatically published:\s*(.+)$/i);
-    const m3 = n.body.match(/Comic:\s*([^·\n]+)/i);
-    comicTitle = (m1?.[1] || m2?.[1] || m3?.[1] || n.title).trim();
+    const m3 = n.title.match(/Chapter synchronization failed:\s*(.+)$/i);
+    const m4 = n.body.match(/Comic:\s*([^·|\n]+)/i);
+    comicTitle = (m1?.[1] || m2?.[1] || m3?.[1] || m4?.[1] || n.title).trim();
   }
 
   // Extract chapter number/label
@@ -114,8 +116,9 @@ export function parseNotifDisplay(
       : n.body;
   }
 
-  // Match coverUrl from meta or comicLookup
-  let matchedCover: string | null = n.meta?.coverUrl ? coverSrc(n.meta.coverUrl) ?? null : null;
+  // Match coverUrl from direct item.coverUrl, meta.coverUrl, or comicLookup
+  const rawDirectCover = n.coverUrl ?? n.meta?.coverUrl ?? null;
+  let matchedCover: string | null = rawDirectCover ? coverSrc(rawDirectCover) ?? rawDirectCover : null;
   let slugOrTitle = n.meta?.comicSlug || comicTitle;
 
   if (!matchedCover) {
@@ -125,6 +128,8 @@ export function parseNotifDisplay(
     if (n.href) {
       const hm = n.href.match(/\/comics\/([^/?#]+)/i);
       if (hm?.[1]) candidates.push(decodeURIComponent(hm[1]).toLowerCase());
+      const idm = n.href.match(/[?&]comicId=([^&#]+)/i);
+      if (idm?.[1]) candidates.push(decodeURIComponent(idm[1]).toLowerCase());
     }
     if (comicTitle) {
       candidates.push(comicTitle.toLowerCase());
@@ -158,7 +163,7 @@ export function parseNotifDisplay(
  * Asura Notifications Dropdown (.notif-panel) matching image_b7315e.png 1:1:
  * - Header: "Notifications" + red unread count badge + "Likes" switch + "Mark all read"
  * - Tabs: All (N) | Chapters (N) | Comments (N)
- * - Chapter rows: Comic Cover thumbnail (40x52px) + bold Comic Title + purple "New:" Chapter X + short time ("5h", "2d")
+ * - Chapter & Admin Alert rows: Comic Cover thumbnail (40x52px) + bold Comic Title + details + short time ("5h", "2d")
  * - Footer: "View All"
  */
 export default function NotificationBell() {
@@ -174,6 +179,7 @@ export default function NotificationBell() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const fetchedTitlesRef = useRef<Set<string>>(new Set());
   const pathname = usePathname();
   const router = useRouter();
 
@@ -184,7 +190,7 @@ export default function NotificationBell() {
     setOpen(false);
   }, [pathname]);
 
-  // Load catalogue covers once so every chapter notification displays its comic cover thumbnail
+  // Load initial catalogue covers
   useEffect(() => {
     let active = true;
     api<{ items: ApiComic[] }>("/comics?pageSize=48&sort=popular", { cache: "no-store" })
@@ -212,6 +218,58 @@ export default function NotificationBell() {
       active = false;
     };
   }, []);
+
+  // Dynamically resolve any notification's comic cover if it wasn't in the initial 48 popular comics
+  useEffect(() => {
+    if (!allItems.length) return;
+    let active = true;
+    const missingTitles: string[] = [];
+    for (const n of allItems) {
+      const info = parseNotifDisplay(n, comicLookup);
+      if (!info.coverUrl && info.comicTitle && info.comicTitle !== n.title) {
+        const key = info.comicTitle.toLowerCase();
+        if (!fetchedTitlesRef.current.has(key)) {
+          fetchedTitlesRef.current.add(key);
+          missingTitles.push(info.comicTitle);
+        }
+      }
+    }
+    if (!missingTitles.length) return;
+
+    Promise.all(
+      missingTitles.slice(0, 10).map((t) =>
+        api<{ items: ApiComic[] }>(`/comics?q=${encodeURIComponent(t)}&pageSize=5`, {
+          cache: "no-store",
+        }).catch(() => ({ items: [] })),
+      ),
+    ).then((results) => {
+      if (!active) return;
+      setComicLookup((prev) => {
+        const next = new Map(prev);
+        for (const res of results) {
+          for (const raw of res.items ?? []) {
+            const c = toComic(raw);
+            if (!c.coverUrl) continue;
+            const entry = { title: c.title, slug: c.slug, coverUrl: c.coverUrl };
+            next.set(c.id.toLowerCase(), entry);
+            next.set(c.slug.toLowerCase(), entry);
+            next.set(c.title.toLowerCase(), entry);
+            next.set(
+              c.title
+                .toLowerCase()
+                .replace(/^official\s+/i, "")
+                .replace(/[^a-z0-9]+/g, ""),
+              entry,
+            );
+          }
+        }
+        return next;
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [allItems, comicLookup]);
 
   const fetchNotifications = useCallback(
     async (showSpinner = false) => {

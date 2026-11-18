@@ -25,6 +25,8 @@ export interface AuthUser {
   emailVerified: boolean;
   avatarUrl?: string | null;
   authProvider?: string;
+  isDelegatedAdmin?: boolean;
+  canManageAdmins?: boolean;
   sessionId: string;
 }
 
@@ -83,15 +85,39 @@ export class SessionGuard implements CanActivate {
       throw new ForbiddenException("This account is not active.");
     }
 
+    const roleName = matchedSession.user.role.name;
+    let isDelegatedAdmin =
+      roleName === "ADMIN" &&
+      Boolean(
+        (matchedSession.user as any).isDelegatedAdmin === true ||
+          ((matchedSession.user.profile?.notifyPrefs as any)?.delegatedAdmin === true),
+      );
+    if (!isDelegatedAdmin && roleName === "ADMIN" && typeof (this.db as any).$queryRawUnsafe === "function") {
+      try {
+        const rows = await this.db.$queryRawUnsafe<{ isDelegatedAdmin: boolean }[]>(
+          `SELECT "isDelegatedAdmin" FROM "User" WHERE "id" = $1 LIMIT 1`,
+          matchedSession.user.id,
+        );
+        if (rows?.[0]?.isDelegatedAdmin === true) {
+          isDelegatedAdmin = true;
+        }
+      } catch {
+        // Ignore if column does not exist in unit test mock
+      }
+    }
+    const canManageAdmins = roleName === "ADMIN" && !isDelegatedAdmin;
+
     req.user = {
       id: matchedSession.user.id,
       username: matchedSession.user.username,
       email: matchedSession.user.email,
-      role: matchedSession.user.role.name,
+      role: roleName,
       permissions: matchedSession.user.role.permissions.map((p: { key: string }) => p.key),
       emailVerified: !!matchedSession.user.emailVerifiedAt,
       avatarUrl: matchedSession.user.profile?.avatarUrl ?? null,
       authProvider: (matchedSession.user as any).authProvider ?? "local",
+      isDelegatedAdmin,
+      canManageAdmins,
       sessionId: matchedSession.id,
     } satisfies AuthUser;
 

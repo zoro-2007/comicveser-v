@@ -4,11 +4,19 @@ import { PrismaService } from "../prisma/prisma.service";
 import { RequirePermission } from "../auth/auth.guard";
 import { slugify } from "../common/util";
 import { GenreDto } from "./dto/genre.dto";
+import { isValidComicGenre, purgeNonCanonicalGenresFromDb } from "../sources/known-metadata";
 
 @Injectable()
 export class GenresService {
   constructor(private db: PrismaService) {}
-  list() { return this.db.genre.findMany({ orderBy: { name: "asc" }, include: { _count: { select: { comics: true } } } }); }
+  async list() {
+    await purgeNonCanonicalGenresFromDb(this.db).catch(() => {});
+    const rows = await this.db.genre.findMany({
+      orderBy: { name: "asc" },
+      include: { _count: { select: { comics: true } } },
+    });
+    return rows.filter((g) => isValidComicGenre(g.name) || isValidComicGenre(g.slug));
+  }
   create(d: GenreDto) { return this.db.genre.create({ data: { name: d.name.trim(), slug: slugify(d.name) } }); }
   update(id: string, d: GenreDto) { return this.db.genre.update({ where: { id }, data: { name: d.name.trim(), slug: slugify(d.name) } }); }
   async remove(id: string) {

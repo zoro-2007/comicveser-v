@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Trash2 } from "lucide-react";
 import { Cover } from "./ComicCard";
 import { hueOf, timeAgo } from "./ProfileStats";
+import { coverSrc } from "@/lib/media";
 
 export interface ActivityItem {
   slug: string;
@@ -13,6 +14,7 @@ export interface ActivityItem {
   lastReadAt: string;
   /** e.g. "Manhwa" — only when the comic's type is known. */
   type?: string | null;
+  coverUrl?: string | null;
 }
 
 export function ActivityRow({ item, onDelete }: { item: ActivityItem; onDelete?: () => void }) {
@@ -20,7 +22,12 @@ export function ActivityRow({ item, onDelete }: { item: ActivityItem; onDelete?:
   return (
     <li className="flex items-center gap-3 rounded-xl border border-[#322A42] bg-[#17141F] p-3 sm:gap-4">
       <Link href={`/comics/${item.slug}`} className="shrink-0" aria-label={item.title}>
-        <Cover hue={hueOf(item.slug)} title={item.title} className="aspect-[2/3] w-12 sm:w-14" />
+        <Cover
+          hue={hueOf(item.slug)}
+          title={item.title}
+          src={coverSrc(item.coverUrl)}
+          className="aspect-[2/3] w-12 sm:w-14"
+        />
       </Link>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">

@@ -12,6 +12,8 @@ export interface AuthUser {
   emailVerified: boolean;
   avatarUrl?: string | null;
   authProvider?: string;
+  isDelegatedAdmin?: boolean;
+  canManageAdmins?: boolean;
 }
 
 export type User = AuthUser;
@@ -23,6 +25,8 @@ type Ctx = {
   status: AuthStatus;
   expired: boolean;
   isAdmin: boolean;
+  isDelegatedAdmin: boolean;
+  canManageAdmins: boolean;
   refresh: () => Promise<AuthUser | null>;
   applyLogin: (loggedInUser?: AuthUser | null, token?: string | null) => Promise<AuthUser | null>;
   logout: () => Promise<void>;
@@ -133,6 +137,8 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       status,
       expired,
       isAdmin: user?.role === "ADMIN",
+      isDelegatedAdmin: Boolean(user?.isDelegatedAdmin),
+      canManageAdmins: user?.role === "ADMIN" && !user?.isDelegatedAdmin && user?.canManageAdmins !== false,
       refresh,
       applyLogin,
       logout,

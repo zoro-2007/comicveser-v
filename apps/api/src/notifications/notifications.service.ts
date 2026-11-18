@@ -61,6 +61,7 @@ export interface AdminChapterAlertPayload {
   chapterUrl?: string | null;
   sourceUrl?: string | null;
   errorMessage?: string | null;
+  coverUrl?: string | null;
 }
 
 function formatReadableDate(val?: Date | string | null, includeTime = false): string {
@@ -84,6 +85,15 @@ function formatReadableDate(val?: Date | string | null, includeTime = false): st
     year: "numeric",
     timeZone: "UTC",
   });
+}
+
+function normalizeLookupKey(raw?: string | null): string {
+  if (!raw) return "";
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^official\s+/i, "")
+    .replace(/[^a-z0-9]+/g, "");
 }
 
 @Injectable()
@@ -144,10 +154,156 @@ export class NotificationsService {
         return true;
       }
     }
-    if (typeof item?.title === "string" && item.title.startsWith("New chapter automatically published")) {
+    if (typeof item?.title === "string" && (
+      item.title.startsWith("New chapter automatically published") ||
+      item.title.startsWith("[Admin Alert]") ||
+      item.title.startsWith("Chapter synchronization failed")
+    )) {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Resolves and attaches comic coverUrl onto notification items (including Admin Alert notifications)
+   * by matching comicId, comicSlug, href, or Comic Title against Comic and SourceTitle rows.
+   */
+  private async attachCoverUrls<T extends Record<string, any>>(items: T[]): Promise<T[]> {
+    if (!items.length || typeof (this.db.comic as any)?.findMany !== "function") return items;
+    try {
+      const comicIds = new Set<string>();
+      const slugs = new Set<string>();
+      const titles = new Set<string>();
+
+      for (const n of items) {
+        const m = n.meta && typeof n.meta === "object" ? n.meta : {};
+        if (typeof m.comicId === "string" && m.comicId) comicIds.add(m.comicId);
+        if (typeof m.comicSlug === "string" && m.comicSlug) slugs.add(m.comicSlug);
+        if (typeof m.comicTitle === "string" && m.comicTitle.trim()) titles.add(m.comicTitle.trim());
+
+        if (typeof n.href === "string") {
+          const slugMatch = n.href.match(/\/comics\/([^/?#]+)/i);
+          if (slugMatch?.[1]) slugs.add(decodeURIComponent(slugMatch[1]));
+          const idMatch = n.href.match(/[?&]comicId=([^&#]+)/i);
+          if (idMatch?.[1]) comicIds.add(decodeURIComponent(idMatch[1]));
+        }
+
+        const bodyMatch = typeof n.body === "string" ? n.body.match(/Comic:\s*([^·|\n]+)/i) : null;
+        if (bodyMatch?.[1]) titles.add(bodyMatch[1].trim());
+
+        if (typeof n.title === "string") {
+          const tMatch =
+            n.title.match(/New Chapter Released!\s*[—:-]\s*(.+)$/i) ??
+            n.title.match(/New chapter automatically published:\s*(.+)$/i) ??
+            n.title.match(/Chapter synchronization failed:\s*(.+)$/i);
+          if (tMatch?.[1]) titles.add(tMatch[1].trim());
+        }
+      }
+
+      const orConditions: any[] = [];
+      if (comicIds.size > 0) orConditions.push({ id: { in: [...comicIds] } });
+      if (slugs.size > 0) orConditions.push({ slug: { in: [...slugs] } });
+      for (const t of titles) {
+        orConditions.push({ title: { equals: t, mode: "insensitive" } });
+      }
+      if (!orConditions.length) return items;
+
+      const comics: any[] = await (this.db.comic as any)
+        .findMany({
+          where: { OR: orConditions },
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            externalCoverUrl: true,
+            coverKey: true,
+            sourceTitles: { select: { coverUrl: true }, take: 1 },
+          },
+        })
+        .catch(() => []);
+
+      const coverMap = new Map<string, { coverUrl: string | null; title: string; slug: string; id: string }>();
+      for (const c of comics) {
+        const stCover = Array.isArray(c.sourceTitles) ? c.sourceTitles.find((s: any) => !!s?.coverUrl)?.coverUrl : null;
+        const resolvedCover = c.externalCoverUrl ?? stCover ?? (c.coverKey ? `/media/${c.coverKey}` : null);
+        if (!resolvedCover) continue;
+        const entry = { coverUrl: resolvedCover, title: c.title, slug: c.slug, id: c.id };
+        coverMap.set(c.id.toLowerCase(), entry);
+        if (c.slug) coverMap.set(c.slug.toLowerCase(), entry);
+        if (c.title) {
+          coverMap.set(c.title.toLowerCase(), entry);
+          coverMap.set(normalizeLookupKey(c.title), entry);
+        }
+      }
+
+      // Also check SourceTitle directly for any comic titles not matched above
+      if (titles.size > 0 && typeof (this.db.sourceTitle as any)?.findMany === "function") {
+        const sourceTitles: any[] = await (this.db.sourceTitle as any)
+          .findMany({
+            where: {
+              OR: [
+                ...(comicIds.size > 0 ? [{ comicId: { in: [...comicIds] } }] : []),
+                ...[...titles].map((t) => ({ title: { equals: t, mode: "insensitive" } })),
+              ],
+            },
+            select: { comicId: true, title: true, coverUrl: true },
+          })
+          .catch(() => []);
+        for (const st of sourceTitles) {
+          if (!st?.coverUrl) continue;
+          const entry = { coverUrl: st.coverUrl, title: st.title, slug: "", id: st.comicId ?? "" };
+          if (st.comicId && !coverMap.has(st.comicId.toLowerCase())) {
+            coverMap.set(st.comicId.toLowerCase(), entry);
+          }
+          if (st.title) {
+            const lk = st.title.toLowerCase();
+            const nk = normalizeLookupKey(st.title);
+            if (!coverMap.has(lk)) coverMap.set(lk, entry);
+            if (nk && !coverMap.has(nk)) coverMap.set(nk, entry);
+          }
+        }
+      }
+
+      return items.map((n) => {
+        const m = n.meta && typeof n.meta === "object" ? { ...n.meta } : {};
+        if (m.coverUrl) return { ...n, coverUrl: m.coverUrl, meta: m };
+
+        const bodyMatch = typeof n.body === "string" ? n.body.match(/Comic:\s*([^·|\n]+)/i) : null;
+        const titleMatch =
+          typeof n.title === "string"
+            ? n.title.match(/New Chapter Released!\s*[—:-]\s*(.+)$/i) ??
+              n.title.match(/New chapter automatically published:\s*(.+)$/i) ??
+              n.title.match(/Chapter synchronization failed:\s*(.+)$/i)
+            : null;
+        const extractedTitle = (m.comicTitle || bodyMatch?.[1] || titleMatch?.[1] || "").trim();
+        const slugMatch = typeof n.href === "string" ? n.href.match(/\/comics\/([^/?#]+)/i) : null;
+        const idMatch = typeof n.href === "string" ? n.href.match(/[?&]comicId=([^&#]+)/i) : null;
+
+        const candidates = [
+          m.comicId,
+          idMatch?.[1] ? decodeURIComponent(idMatch[1]) : null,
+          m.comicSlug,
+          slugMatch?.[1] ? decodeURIComponent(slugMatch[1]) : null,
+          extractedTitle,
+          normalizeLookupKey(extractedTitle),
+        ]
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+          .map((v) => v.toLowerCase());
+
+        for (const key of candidates) {
+          const hit = coverMap.get(key);
+          if (hit?.coverUrl) {
+            m.coverUrl = hit.coverUrl;
+            if (!m.comicTitle && hit.title) m.comicTitle = hit.title;
+            if (!m.comicSlug && hit.slug) m.comicSlug = hit.slug;
+            return { ...n, coverUrl: hit.coverUrl, meta: m };
+          }
+        }
+        return n;
+      });
+    } catch {
+      return items;
+    }
   }
 
   async list(userId: string, page: number, group?: "all" | "messages" | "alerts" | "chapters", userRole?: string) {
@@ -207,7 +363,7 @@ export class NotificationsService {
 
     const authorizedUnread = (allUnreadRaw ?? []).filter((item: any) => isAdmin || !this.isAdminNotification(item)).length;
     const start = (Math.max(1, page) - 1) * 20;
-    const pagedItems = authorizedItems.slice(start, start + 20);
+    const pagedItems = await this.attachCoverUrls(authorizedItems.slice(start, start + 20));
 
     return {
       unread: authorizedUnread,
@@ -252,14 +408,14 @@ export class NotificationsService {
         number: true,
         title: true,
         publishedAt: true,
-        comic: { select: { title: true, slug: true } },
+        comic: { select: { title: true, slug: true, externalCoverUrl: true, coverKey: true } },
         sourceChapter: {
           select: {
             numberLabel: true,
             originalLabel: true,
             title: true,
             publishedAt: true,
-            sourceTitle: { select: { sourceId: true } },
+            sourceTitle: { select: { sourceId: true, coverUrl: true } },
           },
         },
       },
@@ -277,6 +433,11 @@ export class NotificationsService {
     if (!ch) return { notifiedCount: 0 };
 
     const sc = (ch as any).sourceChapter;
+    const comicAny = ch.comic as any;
+    const coverUrl =
+      comicAny?.externalCoverUrl ??
+      sc?.sourceTitle?.coverUrl ??
+      (comicAny?.coverKey ? `/media/${comicAny.coverKey}` : null);
     const displayNum = opts?.displayNumber ?? resolveChapterDisplayNumber(ch, sc);
     const providerId = opts?.providerId ?? sc?.sourceTitle?.sourceId ?? null;
     const providerName =
@@ -299,6 +460,7 @@ export class NotificationsService {
       comicId,
       comicTitle: ch.comic.title,
       comicSlug: ch.comic.slug,
+      coverUrl,
       chapterId,
       chapterNumber: ch.number,
       displayNumber: displayNum,
@@ -386,6 +548,28 @@ export class NotificationsService {
 
     if (!admins.length) return { notifiedAdmins: 0 };
 
+    let resolvedCoverUrl = payload.coverUrl ?? null;
+    if (!resolvedCoverUrl && payload.comicId && typeof (this.db.comic as any)?.findUnique === "function") {
+      try {
+        const c = await (this.db.comic as any).findUnique({
+          where: { id: payload.comicId },
+          select: {
+            externalCoverUrl: true,
+            coverKey: true,
+            sourceTitles: { select: { coverUrl: true }, take: 1 },
+          },
+        });
+        if (c) {
+          resolvedCoverUrl =
+            c.externalCoverUrl ??
+            c.sourceTitles?.[0]?.coverUrl ??
+            (c.coverKey ? `/media/${c.coverKey}` : null);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     const isSuccess = payload.status === "PUBLISHED";
     const title = isSuccess
       ? `New chapter automatically published: ${payload.comicTitle}`
@@ -424,6 +608,7 @@ export class NotificationsService {
       comicId: payload.comicId,
       comicTitle: payload.comicTitle,
       comicSlug: payload.comicSlug,
+      coverUrl: resolvedCoverUrl,
       providerId: payload.providerId,
       providerName: payload.providerName,
       chapterId: payload.chapterId ?? null,
@@ -496,11 +681,12 @@ export class NotificationsService {
     });
 
     const start = (page - 1) * 25;
+    const paged = await this.attachCoverUrls(filtered.slice(start, start + 25));
     return {
       total: filtered.length,
       page,
       filter,
-      items: filtered.slice(start, start + 25),
+      items: paged,
     };
   }
 }

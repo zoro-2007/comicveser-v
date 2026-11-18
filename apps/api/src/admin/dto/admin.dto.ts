@@ -42,6 +42,11 @@ export class SetStatusDto {
   status: UserStatus;
 }
 
+export class SetUserRoleDto {
+  @IsIn(["USER", "ADMIN"])
+  role: "USER" | "ADMIN";
+}
+
 export class ResolveReportDto {
   @IsIn(["OPEN", "RESOLVED", "DISMISSED"])
   status: "OPEN" | "RESOLVED" | "DISMISSED";

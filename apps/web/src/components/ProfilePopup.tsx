@@ -6,7 +6,12 @@ import { useRouter } from "next/navigation";
 import { History, LayoutDashboard, LogOut, MessageSquare, Settings, ShieldCheck, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
 
-export type PopupUser = { username: string; role: string };
+export type PopupUser = {
+  username: string;
+  role: string;
+  isDelegatedAdmin?: boolean;
+  canManageAdmins?: boolean;
+};
 
 export default function ProfilePopup({
   open,
@@ -42,6 +47,7 @@ export default function ProfilePopup({
   if (!open) return null;
 
   const isAdmin = user?.role === "ADMIN";
+  const isDelegatedAdmin = Boolean(user?.isDelegatedAdmin);
   const items = [
     ...(isAdmin ? [{ href: "/admin", label: "Admin Panel", Icon: LayoutDashboard }] : []),
     { href: "/profile", label: "Profile", Icon: UserRound },
@@ -67,7 +73,15 @@ export default function ProfilePopup({
         <div className="min-w-0">
           <p className="flex items-center gap-1.5 truncate text-sm font-bold">
             {user?.username ?? "Account"}
-            {isAdmin && <span className="flex shrink-0 items-center gap-0.5 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-white"><ShieldCheck size={10} /> Admin</span>}
+            {isAdmin && (
+              <span
+                className={`flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-white ${
+                  isDelegatedAdmin ? "bg-red-600" : "bg-primary"
+                }`}
+              >
+                <ShieldCheck size={10} /> Admin
+              </span>
+            )}
           </p>
           {email && <p className="truncate text-xs text-muted">{email}</p>}
         </div>

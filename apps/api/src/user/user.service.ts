@@ -46,8 +46,13 @@ export class UserService {
     return { publishState: "PUBLISHED" as const, deletedAt: null, OR: [{ sourceChapter: { is: null } }, { sourceChapter: { is: { sourceTitle: { state: "APPROVED" as const } } } }] };
   }
 
-  private async coverUrl(c: { externalCoverUrl: string | null; coverKey: string | null }) {
-    return c.externalCoverUrl ?? (c.coverKey ? await this.storage.readUrl(c.coverKey) : null);
+  private async coverUrl(c: {
+    externalCoverUrl?: string | null;
+    coverKey?: string | null;
+    sourceTitles?: Array<{ coverUrl?: string | null }>;
+  }) {
+    const sourceCover = Array.isArray(c.sourceTitles) ? c.sourceTitles.find((s) => !!s?.coverUrl)?.coverUrl : null;
+    return c.externalCoverUrl ?? sourceCover ?? (c.coverKey ? await this.storage.readUrl(c.coverKey) : null);
   }
 
   /** Every visible bookmark with its effective status and reading progress (a library is small, so this is done in one pass). */
@@ -55,9 +60,32 @@ export class UserService {
     const rows = await this.db.bookmark.findMany({
       where: { userId, comic: { AND: [this.visibleComic, ...(search ? [{ OR: [{ title: { contains: search, mode: "insensitive" as const } }, { altTitle: { contains: search, mode: "insensitive" as const } }] }] : [])] } },
       take: 1000,
-      include: { comic: { select: { id: true, slug: true, title: true, type: true, status: true, coverKey: true, externalCoverUrl: true, chapters: {
-        where: { publishState: "PUBLISHED" as const, deletedAt: null }, orderBy: { number: "desc" as const }, take: 1,
-        select: { id: true, number: true, title: true, publishedAt: true, sourceChapter: { select: { numberLabel: true, title: true, publishedAt: true } } } } } } },
+      include: {
+        comic: {
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            type: true,
+            status: true,
+            coverKey: true,
+            externalCoverUrl: true,
+            sourceTitles: { select: { coverUrl: true }, take: 1 },
+            chapters: {
+              where: { publishState: "PUBLISHED" as const, deletedAt: null },
+              orderBy: { number: "desc" as const },
+              take: 1,
+              select: {
+                id: true,
+                number: true,
+                title: true,
+                publishedAt: true,
+                sourceChapter: { select: { numberLabel: true, title: true, publishedAt: true } },
+              },
+            },
+          },
+        },
+      },
     });
     const comicIds = rows.map((r) => r.comicId);
     const [totals, reads, history] = await Promise.all([
@@ -146,11 +174,46 @@ export class UserService {
   /** Most recently finished chapters, for the account page. */
   async readChapters(userId: string) {
     const rows = await this.db.chapterRead.findMany({
-      where: { userId, chapter: this.visibleChapter, comic: this.visibleComic }, orderBy: { readAt: "desc" }, take: 30,
-      include: { comic: { select: { id: true, slug: true, title: true } }, chapter: { select: { id: true, number: true, title: true, sourceChapter: { select: { numberLabel: true, title: true } } } } },
+      where: { userId, chapter: this.visibleChapter, comic: this.visibleComic },
+      orderBy: { readAt: "desc" },
+      take: 30,
+      include: {
+        comic: {
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            coverKey: true,
+            externalCoverUrl: true,
+            sourceTitles: { select: { coverUrl: true }, take: 1 },
+          },
+        },
+        chapter: {
+          select: {
+            id: true,
+            number: true,
+            title: true,
+            sourceChapter: { select: { numberLabel: true, title: true } },
+          },
+        },
+      },
     });
-    return rows.map((r) => ({ comic: r.comic, readAt: r.readAt,
-      chapter: { id: r.chapter.id, number: r.chapter.number, displayNumber: resolveChapterDisplayNumber(r.chapter, r.chapter.sourceChapter) } }));
+    return Promise.all(
+      rows.map(async (r) => ({
+        comic: {
+          id: r.comic.id,
+          slug: r.comic.slug,
+          title: r.comic.title,
+          coverUrl: await this.coverUrl(r.comic),
+        },
+        readAt: r.readAt,
+        chapter: {
+          id: r.chapter.id,
+          number: r.chapter.number,
+          displayNumber: resolveChapterDisplayNumber(r.chapter, r.chapter.sourceChapter),
+        },
+      })),
+    );
   }
 
   async stats(userId: string) {
@@ -184,12 +247,84 @@ export class UserService {
   }
 
   async history(userId: string) {
-    const rows = await this.db.readingHistory.findMany({ where: { userId, comic: this.visibleComic, chapter: { publishState: "PUBLISHED", deletedAt: null, OR: [{ sourceChapter: { is: null } }, { sourceChapter: { is: { sourceTitle: { state: "APPROVED" } } } }] } }, orderBy: { updatedAt: "desc" }, take: 50,
-      include: { comic: { select: { id: true, slug: true, title: true } }, chapter: { select: { id: true, number: true, title: true, sourceChapter: { select: { numberLabel: true, title: true } } } } } });
-    return rows.map((r) => {
-      const { sourceChapter, ...chapter } = r.chapter;
-      return { comic: r.comic, chapter: { ...chapter, displayNumber: resolveChapterDisplayNumber(chapter, sourceChapter) }, imageIndex: r.imageIndex, scrollY: r.scrollY, lastReadAt: r.updatedAt };
-    });
+    const rows = await this.db.readingHistory
+      .findMany({
+        where: {
+          userId,
+          comic: this.visibleComic,
+          chapter: {
+            publishState: "PUBLISHED",
+            deletedAt: null,
+            OR: [{ sourceChapter: { is: null } }, { sourceChapter: { is: { sourceTitle: { state: "APPROVED" } } } }],
+          },
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 50,
+        include: {
+          comic: {
+            select: {
+              id: true,
+              slug: true,
+              title: true,
+              coverKey: true,
+              externalCoverUrl: true,
+              sourceTitles: { select: { coverUrl: true }, take: 1 },
+            },
+          },
+          chapter: {
+            select: {
+              id: true,
+              number: true,
+              title: true,
+              sourceChapter: { select: { numberLabel: true, title: true } },
+            },
+          },
+        },
+      })
+      .catch(() =>
+        this.db.readingHistory.findMany({
+          where: {
+            userId,
+            comic: this.visibleComic,
+            chapter: {
+              publishState: "PUBLISHED",
+              deletedAt: null,
+              OR: [{ sourceChapter: { is: null } }, { sourceChapter: { is: { sourceTitle: { state: "APPROVED" } } } }],
+            },
+          },
+          orderBy: { updatedAt: "desc" },
+          take: 50,
+          include: {
+            comic: { select: { id: true, slug: true, title: true, coverKey: true, externalCoverUrl: true } },
+            chapter: {
+              select: {
+                id: true,
+                number: true,
+                title: true,
+                sourceChapter: { select: { numberLabel: true, title: true } },
+              },
+            },
+          },
+        }),
+      );
+    return Promise.all(
+      rows.map(async (r: any) => {
+        const { sourceChapter, ...chapter } = r.chapter;
+        const coverUrl = await this.coverUrl(r.comic);
+        return {
+          comic: {
+            id: r.comic.id,
+            slug: r.comic.slug,
+            title: r.comic.title,
+            coverUrl,
+          },
+          chapter: { ...chapter, displayNumber: resolveChapterDisplayNumber(chapter, sourceChapter) },
+          imageIndex: r.imageIndex,
+          scrollY: r.scrollY,
+          lastReadAt: r.updatedAt,
+        };
+      }),
+    );
   }
 
   async reviews(userId: string) {

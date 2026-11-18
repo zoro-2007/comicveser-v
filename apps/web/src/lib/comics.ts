@@ -12,12 +12,12 @@ export interface Comic {
   views: number; addedAt: string; updatedAt: string; chapters: Chapter[]; chapterCount: number; latest: Chapter | null; coverUrl: string | null;
 }
 
-export const GENRES = ["Action","Adventure","Fantasy","Romance","Comedy","Drama","Martial Arts","Mystery","Horror","Supernatural","Sci-Fi","Historical","Reincarnation","Regression","School Life","Murim"];
+export const GENRES = ["Action","Adventure","Fantasy","Romance","Comedy","Drama","Martial Arts","Mystery","Horror","Supernatural","Sci-Fi","Historical","Reincarnation","Regression","School Life","Murim","Shounen","Seinen","Shoujo","Josei","Isekai","Sports","Slice of Life","Psychological","Thriller","System","Dungeon"];
 export const TYPES: ComicType[] = ["Manga","Manhwa","Manhua","Webtoon"];
 export const STATUSES: ComicStatus[] = ["Ongoing","Completed","Hiatus"];
 export const SORTS = [
-  ["updated","Latest update"],["added","Recently added"],["rating","Highest rated"],["popular","Most popular"],
-  ["chapters","Most chapters"],["alpha","Alphabetical"],
+  ["updated","Latest Update"],["added","Recently Added"],["rating","Highest Rated"],["popular","Most Popular"],
+  ["chapters","Most Chapters"],["alpha","Alphabetical"],
 ] as const;
 export const MIN_CHAPTER_OPTIONS = [10, 25, 50, 100, 200] as const;
 
@@ -29,6 +29,42 @@ export const slugifyGenre = (s: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+
+/**
+ * Canonical comic genres recognized on the frontend so polluted MangaUpdates/Baka-Updates
+ * trope tags (e.g. "Male Protagonist", "Strong Character/s", "Tattoo/s", "Long Strip") are never displayed.
+ */
+const CANONICAL_FRONTEND_GENRES: readonly string[] = [
+  "Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen", "Shoujo", "Seinen", "Josei",
+  "Romance", "Sci-Fi", "Supernatural", "Mystery", "Psychological", "Horror", "Thriller",
+  "Slice of Life", "School Life", "Sports", "Martial Arts", "Mecha", "Historical", "Military",
+  "Music", "Ecchi", "Harem", "Isekai", "Mature", "Adult", "Smut", "Gender Bender", "Yaoi",
+  "Yuri", "Shounen Ai", "Shoujo Ai", "Doujinshi", "One Shot", "Tragedy", "Super Power",
+  "Vampire", "Magic", "Monsters", "Demons", "Ghosts", "Cooking", "Medical", "Police",
+  "Post-Apocalyptic", "Apocalyptic", "Samurai", "Zombies", "Reincarnation", "Regression",
+  "Time Travel", "System", "Dungeon", "Murim", "Wuxia", "Cultivation", "Villainess",
+  "Video Games", "Virtual Reality", "Overpowered", "Necromancer", "Returner", "Delinquents",
+  "Mafia", "Crime", "Philosophical", "Superhero", "Magical Girls", "Reverse Harem", "Survival",
+  "Adaptation", "Webtoon", "Tower", "Hunter", "Academy", "Parody", "Space", "Cyberpunk",
+  "Steampunk", "Mythology", "Detective", "Gaming", "Revenge", "Dark Fantasy", "Urban Fantasy",
+];
+
+const CANONICAL_FRONTEND_GENRE_MAP = new Map<string, string>(
+  CANONICAL_FRONTEND_GENRES.map((g) => [slugifyGenre(g), g]),
+);
+CANONICAL_FRONTEND_GENRE_MAP.set("shonen", "Shounen");
+CANONICAL_FRONTEND_GENRE_MAP.set("shojo", "Shoujo");
+CANONICAL_FRONTEND_GENRE_MAP.set("scifi", "Sci-Fi");
+CANONICAL_FRONTEND_GENRE_MAP.set("science-fiction", "Sci-Fi");
+CANONICAL_FRONTEND_GENRE_MAP.set("school", "School Life");
+CANONICAL_FRONTEND_GENRE_MAP.set("super-powers", "Super Power");
+
+export function normalizeDisplayGenre(raw?: string | null): string | null {
+  if (!raw || typeof raw !== "string") return null;
+  const cleaned = raw.trim();
+  if (!cleaned || cleaned.includes("/")) return null;
+  return CANONICAL_FRONTEND_GENRE_MAP.get(slugifyGenre(cleaned)) ?? null;
+}
 
 const ADMIN_RATINGS_STORAGE_KEY = "cv:admin:ratings";
 
@@ -120,7 +156,7 @@ const KNOWN_COMIC_FALLBACKS: Record<string, FallbackComicMeta> = {
   questism: {
     description:
       "Kim Soohyun is an ordinary high school student at the bottom of the school hierarchy who has no talent for studying, fighting, or being attractive. Suddenly, a mysterious quest window appears right in front of his eyes, granting him supernatural rewards for completing quests as he sets out to unite Gangbuk.",
-    genres: ["Action", "Comedy", "Drama", "School Life", "Supernatural"],
+    genres: ["Action", "Comedy", "Drama", "Fantasy", "Martial Arts", "School Life", "Supernatural"],
     rating: 8.8,
     type: "Manhwa",
     author: "PTJ Comics, YuNuni",
@@ -129,7 +165,7 @@ const KNOWN_COMIC_FALLBACKS: Record<string, FallbackComicMeta> = {
   questsupremacy: {
     description:
       "Kim Soohyun is an ordinary high school student at the bottom of the school hierarchy who has no talent for studying, fighting, or being attractive. Suddenly, a mysterious quest window appears right in front of his eyes, granting him supernatural rewards for completing quests as he sets out to unite Gangbuk.",
-    genres: ["Action", "Comedy", "Drama", "School Life", "Supernatural"],
+    genres: ["Action", "Comedy", "Drama", "Fantasy", "Martial Arts", "School Life", "Supernatural"],
     rating: 8.8,
     type: "Manhwa",
     author: "PTJ Comics, YuNuni",
@@ -147,7 +183,7 @@ const KNOWN_COMIC_FALLBACKS: Record<string, FallbackComicMeta> = {
   bleach: {
     description:
       "Ichigo Kurosaki is a teenager gifted with the ability to see spirits. His life is forever changed when he meets Rukia Kuchiki, a Soul Reaper battling evil spirits known as Hollows. After Rukia is gravely injured defending Ichigo's family, she transfers her Soul Reaper powers to him, drawing Ichigo into the vast supernatural conflicts of Soul Society, Hueco Mundo, and the Wandenreich.",
-    genres: ["Action", "Adventure", "Fantasy", "Supernatural"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen", "Supernatural"],
     rating: 9.0,
     type: "Manga",
     author: "Tite Kubo",
@@ -156,7 +192,7 @@ const KNOWN_COMIC_FALLBACKS: Record<string, FallbackComicMeta> = {
   fairytail: {
     description:
       "In the magical kingdom of Fiore, young celestial wizard Lucy Heartfilia dreams of joining the legendary—and notoriously destructive—Fairy Tail wizards' guild. When she crosses paths with Natsu Dragneel, a fire-breathing Dragon Slayer searching for his foster father Igneel, and his flying cat Happy, she is swept into a grand adventure alongside Erza Scarlet and Gray Fullbuster.",
-    genres: ["Action", "Adventure", "Comedy", "Fantasy"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen"],
     rating: 8.6,
     type: "Manga",
     author: "Hiro Mashima",
@@ -165,7 +201,7 @@ const KNOWN_COMIC_FALLBACKS: Record<string, FallbackComicMeta> = {
   onepiece: {
     description:
       "Gol D. Roger, the King of the Pirates, ignited the Great Pirate Era with his final words revealing the existence of the ultimate treasure, the One Piece, hidden on the Grand Line. Monkey D. Luffy, a boy whose body gained the properties of rubber after eating the Gum-Gum Devil Fruit, sets sail with his Straw Hat Pirates crew to brave the seas and become the next King of the Pirates.",
-    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy"],
+    genres: ["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Shounen"],
     rating: 9.6,
     type: "Manga",
     author: "Eiichiro Oda",
@@ -283,14 +319,25 @@ export const toComic = (a: ApiComic, chapters: Chapter[] = []): Comic => {
   const effectiveRating = providerRating ?? userRating ?? 0;
 
   const rawGenres = Array.isArray(a.genres) ? a.genres : [];
-  const extractedGenres = rawGenres
-    .map((g: any) => (typeof g === "string" ? g : g?.genre?.name))
-    .filter((n): n is string => Boolean(n));
-  const finalGenres = extractedGenres.length > 0 ? extractedGenres : fallback?.genres ?? [];
-  const finalGenreSlugs =
-    extractedGenres.length > 0
-      ? rawGenres.map((g: any) => (typeof g === "string" ? slugifyGenre(g) : g?.genre?.slug || slugifyGenre(g?.genre?.name || "")))
-      : finalGenres.map((name) => slugifyGenre(name));
+  const seenSlugs = new Set<string>();
+  const extractedGenres: string[] = [];
+  for (const g of rawGenres) {
+    const rawName = typeof g === "string" ? g : g?.genre?.name;
+    const canonical = normalizeDisplayGenre(rawName);
+    if (!canonical) continue;
+    const s = slugifyGenre(canonical);
+    if (seenSlugs.has(s)) continue;
+    seenSlugs.add(s);
+    extractedGenres.push(canonical);
+  }
+  // If the comic had >10 polluted tags on the server and matches a known WeebCentral title, use its clean WeebCentral genres
+  const finalGenres =
+    rawGenres.length > 10 && fallback?.genres?.length
+      ? fallback.genres
+      : extractedGenres.length > 0
+      ? extractedGenres
+      : fallback?.genres ?? [];
+  const finalGenreSlugs = finalGenres.map((name) => slugifyGenre(name));
 
   const finalDescription =
     !isMissingDescription(a.description, a.title)
@@ -350,10 +397,11 @@ export async function getGenres(): Promise<GenreOption[]> {
     );
     if (Array.isArray(rows)) {
       for (const r of rows) {
-        if (!r?.name) continue;
-        const slug = r.slug || slugifyGenre(r.name);
+        const canonical = normalizeDisplayGenre(r?.name);
+        if (!canonical) continue;
+        const slug = slugifyGenre(canonical);
         if (!slug) continue;
-        map.set(slug, { id: r.id, name: r.name, slug, count: r._count?.comics ?? 0 });
+        map.set(slug, { id: r.id, name: canonical, slug, count: r._count?.comics ?? 0 });
       }
     }
   } catch {
@@ -370,14 +418,13 @@ export async function getGenres(): Promise<GenreOption[]> {
 
 export interface BrowseQuery {
   q?: string; genre?: string; type?: string; status?: string; creator?: string; minChapters?: string;
-  minRating?: string; year?: string; sort?: string; page?: string;
+  minRating?: string; year?: string; sort?: string; page?: string; hideBookmarked?: string;
 }
 export const PAGE_SIZE = 24;
 
 export async function browseComics(p: BrowseQuery) {
   const sp = new URLSearchParams({ pageSize: String(PAGE_SIZE), page: String(Math.max(1, Number(p.page) || 1)) });
   if (p.q?.trim()) sp.set("q", p.q.trim().slice(0, 100));
-  // Accept any genre name or slug dynamically without restricting to a hardcoded frontend array.
   const genreSlugs = Array.from(
     new Set(
       (p.genre ?? "")
@@ -392,7 +439,7 @@ export async function browseComics(p: BrowseQuery) {
   if (p.type && (TYPES as string[]).some((t) => t.toLowerCase() === p.type!.toLowerCase())) {
     sp.set("type", p.type.toUpperCase());
   }
-  if (p.status && (STATUSES as string[]).some((s) => s.toLowerCase() === p.status!.toLowerCase())) {
+  if (p.status && (STATUSES as string[]).some((s) => s.toLowerCase() === s.toLowerCase() && s.toLowerCase() === p.status!.toLowerCase())) {
     sp.set("status", p.status.toUpperCase());
   }
   if (p.minRating && Number(p.minRating) >= 1 && Number(p.minRating) <= 10) sp.set("minRating", p.minRating);

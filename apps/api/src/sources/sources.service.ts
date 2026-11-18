@@ -12,7 +12,7 @@ import {
 } from "@nestjs/common";
 import { NotificationsService } from "../notifications/notifications.service";
 import { parseWeebCentralChapterLabel } from "./weebcentral.normalize";
-import { fetchExternalProviderMetadata, isPlaceholderComicDescription, lookupCuratedSeriesMetadata } from "./known-metadata";
+import { fetchExternalProviderMetadata, filterValidComicGenres, isPlaceholderComicDescription, lookupCuratedSeriesMetadata, purgeNonCanonicalGenresFromDb } from "./known-metadata";
 import { canonicalAsuraSlug } from "./asurascans.normalize";
 import { resolveChapterDisplayNumber } from "./chapter-display";
 import { loadSourceSyncConfig } from "./sources.config";
@@ -139,13 +139,10 @@ export interface FallbackCandidateItem {
 }
 
 function cleanGenreList(rawGenres?: unknown): Array<{ name: string; slug: string }> {
-  if (!Array.isArray(rawGenres)) return [];
+  const validNames = filterValidComicGenres(rawGenres);
   const out: Array<{ name: string; slug: string }> = [];
   const seen = new Set<string>();
-  for (const g of rawGenres) {
-    if (typeof g !== "string") continue;
-    const name = g.replace(/\s+/g, " ").trim();
-    if (!name || name.length > 50 || /^\d+$/.test(name)) continue;
+  for (const name of validNames) {
     const slug = slugify(name);
     if (!slug || seen.has(slug)) continue;
     seen.add(slug);
@@ -213,6 +210,7 @@ export class SourcesService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     if (process.env.DISABLE_JOBS === "true" || process.env.NODE_ENV === "test") return;
+    void purgeNonCanonicalGenresFromDb(this.db, true).catch(() => {});
     this.startAutomaticSyncScheduler();
   }
 
@@ -433,7 +431,7 @@ export class SourcesService implements OnModuleInit, OnModuleDestroy {
         const matched = findMatchingSummary(searchRes.items, candidateTitles);
         if (!matched) continue;
 
-        addGenres(matched.genres);
+        if (genreMap.size === 0) addGenres(matched.genres);
         if (rating === null) rating = validRating(matched.rating);
         if (description === null && !this.isPlaceholderDescription(matched.description)) {
           description = matched.description!.trim();
@@ -445,7 +443,7 @@ export class SourcesService implements OnModuleInit, OnModuleDestroy {
         if (genreMap.size === 0 || rating === null || description === null) {
           const det = await this.providerDetails(pid, matched.externalId).catch(() => null);
           if (det) {
-            addGenres(det.genres);
+            if (genreMap.size === 0) addGenres(det.genres);
             if (rating === null) rating = validRating(det.rating);
             if (description === null && !this.isPlaceholderDescription(det.description)) {
               description = det.description!.trim();
@@ -468,7 +466,7 @@ export class SourcesService implements OnModuleInit, OnModuleDestroy {
         lookupCuratedSeriesMetadata(cleanTitle, opts.alternativeTitles) ??
         (await fetchExternalProviderMetadata(cleanTitle, opts.alternativeTitles).catch(() => null));
       if (extMeta) {
-        addGenres(extMeta.genres);
+        if (genreMap.size === 0) addGenres(extMeta.genres);
         if (rating === null && extMeta.rating !== null) rating = validRating(extMeta.rating);
         if (description === null && !this.isPlaceholderDescription(extMeta.description, cleanTitle)) {
           description = extMeta.description.trim();
