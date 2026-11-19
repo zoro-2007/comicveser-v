@@ -356,6 +356,58 @@ export class ComicsService {
     return { ...withRating, chapterCount };
   }
 
+
+  async coverFile(id: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const comic = await this.db.comic.findFirst({
+      where: { id, ...this.publicWhere },
+      select: {
+        coverKey: true,
+        externalCoverUrl: true,
+        sourceTitles: { where: { state: "APPROVED" }, select: { coverUrl: true }, take: 1 },
+      },
+    });
+    if (!comic) throw new NotFoundException("Comic not found.");
+    const targetUrl =
+      comic.externalCoverUrl ??
+      (await this.mediaUrl(comic.coverKey)) ??
+      comic.sourceTitles?.[0]?.coverUrl ??
+      null;
+    if (!targetUrl) throw new NotFoundException("Cover not found.");
+
+    const resolvedUrl = /^https?:\/\//i.test(targetUrl)
+      ? targetUrl
+      : `http://127.0.0.1:${process.env.PORT || 4000}${targetUrl.startsWith("/") ? targetUrl : `/${targetUrl}`}`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const upstream = await fetch(resolvedUrl, {
+        method: "GET",
+        redirect: "follow",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "ComicVerseOfflineFetcher/1.0",
+          Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        },
+      });
+      if (!upstream.ok) throw new NotFoundException(`Could not fetch cover (${upstream.status}).`);
+      const rawType = (upstream.headers.get("content-type") || "application/octet-stream").split(";")[0].trim().toLowerCase();
+      if (!rawType.startsWith("image/") && rawType !== "application/octet-stream") {
+        throw new BadRequestException("Upstream cover is not an image.");
+      }
+      const arr = await upstream.arrayBuffer();
+      if (arr.byteLength === 0 || arr.byteLength > 10 * 1024 * 1024) {
+        throw new BadRequestException("Invalid cover image size.");
+      }
+      return {
+        buffer: Buffer.from(arr),
+        contentType: rawType.startsWith("image/") ? rawType : "image/jpeg",
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async chapters(comicId: string, order: "asc" | "desc" = "desc") {
     const comic = await this.db.comic.findFirst({ where: { id: comicId, ...this.publicWhere }, select: { id: true } });
     if (!comic) throw new NotFoundException("Comic not found.");

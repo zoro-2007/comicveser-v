@@ -40,7 +40,7 @@ export function UserAvatar({
 /**
  * Asura Profile Popup (.profile-menu):
  * Header: 56x56 avatar + username + email + ADMIN badge (Gold for Primary Admin, Red for Promoted/Delegated Admin).
- * Items: Admin Panel (compact row for admins only), Profile, Messages, History, Settings — divider — Log out.
+ * Items: Admin Panel (compact row for admins only), Profile, Messages, Downloads, History, Settings — divider — Log out.
  */
 export default function ProfileMenu() {
   const { user, isAdmin, isDelegatedAdmin, logout } = useAuth();
@@ -153,6 +153,29 @@ export default function ProfileMenu() {
               <path d="M21 12a8 8 0 0 1-8 8c-1.2 0-2.4-.3-3.4-.7L4 20l.8-3.8A8 8 0 1 1 21 12z" />
             </svg>
             <span>Messages</span>
+          </Link>
+
+          <Link
+            role="menuitem"
+            href="/downloads"
+            tabIndex={tab}
+            className="pm-item"
+            onClick={close}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 3v12" />
+              <path d="m7 11 5 5 5-5" />
+              <path d="M5 20h14" />
+            </svg>
+            <span>Downloads</span>
           </Link>
 
           <Link

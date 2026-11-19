@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query, Res } from "@nestjs/common";
+import type { Response } from "express";
 import { ApiTags } from "@nestjs/swagger";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
 import { ComicsService } from "./comics.service";
@@ -16,6 +17,14 @@ export class ComicsController {
   @Get("comics/trending") trending() { return this.svc.trending(); }
   @Get("comics/latest") latest() { return this.svc.latest(); }
   @Get("comics/popular") popular(@Query("period") period?: string) { return this.svc.popular(period === "weekly" || period === "monthly" ? period : "all"); }
+  @Get("comics/:id/cover/file")
+  async coverFile(@Param("id") id: string, @Res() res: Response) {
+    const { buffer, contentType } = await this.svc.coverFile(id);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(buffer);
+  }
   @Get("comics/:id/chapters") chapters(@Param("id") id: string, @Query("order") order?: "asc" | "desc") {
     return this.svc.chapters(id, order === "asc" ? "asc" : "desc");
   }

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { History, LayoutDashboard, LogOut, MessageSquare, Settings, ShieldCheck, UserRound } from "lucide-react";
+import { Download, History, LayoutDashboard, LogOut, MessageSquare, Settings, ShieldCheck, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
 
 export type PopupUser = {
@@ -52,6 +52,7 @@ export default function ProfilePopup({
     ...(isAdmin ? [{ href: "/admin", label: "Admin Panel", Icon: LayoutDashboard }] : []),
     { href: "/profile", label: "Profile", Icon: UserRound },
     { href: "/profile/messages", label: "Messages", Icon: MessageSquare },
+    { href: "/downloads", label: "Downloads", Icon: Download },
     { href: "/profile/history", label: "History", Icon: History },
     { href: "/profile/settings", label: "Settings", Icon: Settings },
   ];

@@ -1,18 +1,29 @@
 "use client";
 import Link from "next/link";
+import { Eye } from "lucide-react";
 import { useLibrary } from "./LibraryProvider";
 
-/** Shows "Continue Ch. X" when the signed-in reader has saved progress in this comic. */
-export default function ContinueButton({ comicId, slug }: { comicId: string; slug: string }) {
+/** Shows white "Continue Reading" when the reader has progress in this comic, or white "First Chapter" otherwise. */
+export default function ContinueButton({
+  comicId,
+  slug,
+  firstChapterId,
+}: {
+  comicId: string;
+  slug: string;
+  firstChapterId?: string;
+}) {
   const p = useLibrary().progressFor(comicId);
-  if (!p) return null;
+  const targetChapterId = p?.chapterId || firstChapterId;
+  if (!targetChapterId) return null;
+
   return (
     <Link
-      href={`/comics/${slug}/chapter/${p.chapterId}`}
-      className="pillbtn"
-      style={{ padding: "11px 22px", fontSize: 13.5, marginLeft: 0 }}
+      href={`/comics/${slug}/chapter/${targetChapterId}`}
+      className="cv-detail-btn cv-read-btn"
     >
-      ▶ Continue Ch. {p.displayNumber ?? p.number}
+      <Eye size={17} aria-hidden />
+      <span>{p ? "Continue Reading" : "First Chapter"}</span>
     </Link>
   );
 }

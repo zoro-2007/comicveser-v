@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter } from "next/navigation";
 import { ApiError, api } from "@/lib/api";
 import { useAuth } from "./AuthProvider";
+import { getPendingOfflineReads } from "@/lib/offline-read-sync";
 
 export interface ReadingProgress { chapterId: string; number: number; displayNumber?: string; imageIndex: number }
 type Ctx = {
@@ -89,7 +90,21 @@ export default function LibraryProvider({ children }: { children: React.ReactNod
     isBookmarked: (id) => marks.has(id),
     bookmarkedItems: markItems,
     toggleBookmark,
-    progressFor: (id) => history.get(id) ?? null,
+    progressFor: (id) => {
+      const serverProg = history.get(id) ?? null;
+      const pending = getPendingOfflineReads().filter((p) => p.comicId === id);
+      if (pending.length === 0) return serverProg;
+      const latest = pending[pending.length - 1];
+      if (!serverProg || latest.number >= serverProg.number) {
+        return {
+          chapterId: latest.chapterId,
+          number: latest.number,
+          displayNumber: latest.displayNumber,
+          imageIndex: latest.imageIndex,
+        };
+      }
+      return serverProg;
+    },
   }), [ready, userId, marks, markItems, history, toggleBookmark]);
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;

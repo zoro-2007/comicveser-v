@@ -8,6 +8,8 @@ import Track from "@/components/Track";
 import ReviewsSection from "@/components/ReviewsSection";
 import BookmarkButton from "@/components/BookmarkButton";
 import ChapterList from "@/components/ChapterList";
+import ReadOfflineButton from "@/components/ReadOfflineButton";
+import SynopsisExpand from "@/components/SynopsisExpand";
 import { allComics, chapterLabel, formatRating, getComic, latestChapter, slugifyGenre, timeAgo } from "@/lib/comics";
 
 type Props = { params: { slug: string } };
@@ -105,33 +107,31 @@ export default async function ComicPage({ params }: Props) {
               </div>
             )}
 
-            <p className="synop">{c.description}</p>
+            <SynopsisExpand text={c.description} />
 
-            <div className="detail-actions">
+            <div className="detail-actions detail-btn-row">
+              <BookmarkButton comicId={c.id} />
               {c.chapters.length > 0 ? (
                 <>
-                  <ContinueButton comicId={c.id} slug={c.slug} />
-                  <Link
-                    href={`/comics/${c.slug}/chapter/${c.chapters[0].id}`}
-                    className="pillbtn"
-                    style={{ padding: "11px 22px", fontSize: 13.5, marginLeft: 0 }}
-                  >
-                    ▶ Start Reading — Ch. {chapterLabel(c.chapters[0])}
-                  </Link>
-                  <Link
-                    href={`/comics/${c.slug}/chapter/${last.id}`}
-                    className="pillbtn ghost"
-                    style={{ padding: "11px 20px", fontSize: 13.5, marginLeft: 0 }}
-                  >
-                    Latest: Ch. {chapterLabel(last)}
-                  </Link>
+                  <ContinueButton comicId={c.id} slug={c.slug} firstChapterId={c.chapters[0].id} />
+                  <ReadOfflineButton />
                 </>
               ) : (
                 <span style={{ color: "var(--muted)", fontSize: 13 }}>
                   No chapters published yet.
                 </span>
               )}
-              <BookmarkButton comicId={c.id} />
+            </div>
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              {c.chapters.length > 0 && (
+                <Link
+                  href={`/comics/${c.slug}/chapter/${last.id}`}
+                  className="pillbtn ghost"
+                  style={{ padding: "7px 14px", fontSize: 12, marginLeft: 0 }}
+                >
+                  Latest: Ch. {chapterLabel(last)}
+                </Link>
+              )}
               <ReportButton targetType="comic" targetId={c.id} comicId={c.id} label="★ Report / Feedback" />
             </div>
           </div>
@@ -140,7 +140,7 @@ export default async function ComicPage({ params }: Props) {
 
       {/* Main Content Panels */}
       <div className="wrap" style={{ paddingBottom: 34 }}>
-        <ChapterList slug={c.slug} comicId={c.id} chapters={c.chapters} />
+        <ChapterList slug={c.slug} comicId={c.id} chapters={c.chapters} comic={c} />
 
         <ReviewsSection comicId={c.id} />
 

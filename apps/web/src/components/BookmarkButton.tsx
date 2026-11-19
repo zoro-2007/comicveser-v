@@ -1,4 +1,5 @@
 "use client";
+import { Bookmark } from "lucide-react";
 import { useLibrary } from "./LibraryProvider";
 
 export default function BookmarkButton({ comicId }: { comicId: string }) {
@@ -9,10 +10,10 @@ export default function BookmarkButton({ comicId }: { comicId: string }) {
       type="button"
       onClick={() => void lib.toggleBookmark(comicId)}
       aria-pressed={on}
-      className="pillbtn ghost"
-      style={{ padding: "11px 20px", fontSize: 13.5, marginLeft: 0 }}
+      className={`cv-detail-btn ${on ? "cv-bm-on" : "cv-bm-off"}`}
     >
-      {on ? "✓ Bookmarked" : lib.signedIn || !lib.ready ? "Bookmark" : "Log in to bookmark"}
+      <Bookmark size={16} className={on ? "fill-current" : ""} aria-hidden />
+      <span>{on ? "Bookmarked" : "Bookmark"}</span>
     </button>
   );
 }

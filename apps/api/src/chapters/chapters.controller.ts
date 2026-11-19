@@ -1,5 +1,6 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Put, Query, Res } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
+import type { Response } from "express";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
 import { ChaptersService } from "./chapters.service";
 import { CreateChapterDto, ImagesQuery, RegisterImagesDto, ReorderDto, UpdateChapterDto, UploadUrlDto } from "./dto/chapter.dto";
@@ -10,6 +11,19 @@ export class ChaptersController {
   constructor(private svc: ChaptersService) {}
   @Get("chapters/:id") meta(@Param("id") id: string) { return this.svc.meta(id); }
   @Get("chapters/:id/images") images(@Param("id") id: string, @Query() q: ImagesQuery) { return this.svc.images(id, q.from, q.limit); }
+
+  @Get("chapters/:id/pages/:position/file")
+  async pageFile(
+    @Param("id") id: string,
+    @Param("position", ParseIntPipe) position: number,
+    @Res() res: Response,
+  ) {
+    const { buffer, contentType } = await this.svc.pageFile(id, position);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(buffer);
+  }
 
   @RequirePermission("chapter:write") @Post("admin/chapters")
   create(@CurrentUser() u: AuthUser, @Body() d: CreateChapterDto) { return this.svc.create(d, u.id); }

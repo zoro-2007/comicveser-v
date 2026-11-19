@@ -82,6 +82,86 @@ export class ChaptersService {
     return { total, from, items };
   }
 
+
+  private pageUrlCache = new Map<string, { expiresAt: number; urls: string[] }>();
+
+  async pageFile(id: string, position: number): Promise<{ buffer: Buffer; contentType: string }> {
+    if (!Number.isInteger(position) || position < 0 || position > 2000) {
+      throw new BadRequestException("Invalid page position.");
+    }
+    const now = Date.now();
+    let cached = this.pageUrlCache.get(id);
+    if (!cached || cached.expiresAt <= now) {
+      const chapter = await this.db.chapter.findFirst({
+        where: { id, ...this.liveWhere },
+        include: { sourceChapter: { include: { sourceTitle: { select: { state: true } } } } },
+      });
+      if (!chapter || (chapter.sourceChapter && chapter.sourceChapter.sourceTitle.state !== "APPROVED")) {
+        throw new NotFoundException("Chapter not found.");
+      }
+
+      let urls: string[] = [];
+      if (chapter.sourceChapter) {
+        const pageBatch = await this.sources.publishedChapterPages(id, 0, 2000);
+        urls = (pageBatch?.items ?? []).map((it) => it.url);
+      } else {
+        const rows = await this.db.chapterImage.findMany({
+          where: { chapterId: id },
+          orderBy: { position: "asc" },
+          select: { storageKey: true },
+        });
+        urls = await Promise.all(rows.map((r) => this.storage.readUrl(r.storageKey)));
+      }
+      if (this.pageUrlCache.size > 200) {
+        const firstKey = this.pageUrlCache.keys().next().value;
+        if (firstKey) this.pageUrlCache.delete(firstKey);
+      }
+      cached = { expiresAt: now + 5 * 60_000, urls };
+      this.pageUrlCache.set(id, cached);
+    }
+
+    const targetUrl = cached.urls[position] ?? null;
+
+    if (!targetUrl) {
+      throw new NotFoundException("Page not found.");
+    }
+
+    const resolvedUrl = /^https?:\/\//i.test(targetUrl)
+      ? targetUrl
+      : `http://127.0.0.1:${process.env.PORT || 4000}${targetUrl.startsWith("/") ? targetUrl : `/${targetUrl}`}`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const upstream = await fetch(resolvedUrl, {
+        method: "GET",
+        redirect: "follow",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "ComicVerseOfflineFetcher/1.0",
+          Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        },
+      });
+      if (!upstream.ok) {
+        throw new NotFoundException(`Could not fetch page image (${upstream.status}).`);
+      }
+      const rawType = (upstream.headers.get("content-type") || "application/octet-stream").split(";")[0].trim().toLowerCase();
+      if (!rawType.startsWith("image/") && rawType !== "application/octet-stream") {
+        throw new BadRequestException("Upstream resource is not an image.");
+      }
+      const arr = await upstream.arrayBuffer();
+      if (arr.byteLength === 0 || arr.byteLength > 15 * 1024 * 1024) {
+        throw new BadRequestException("Invalid image size.");
+      }
+      return {
+        buffer: Buffer.from(arr),
+        contentType: rawType.startsWith("image/") ? rawType : "image/jpeg",
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async create(dto: CreateChapterDto, actorId: string) {
     const comic = await this.db.comic.findFirst({ where: { id: dto.comicId, deletedAt: null }, select: { id: true } });
     if (!comic) throw new NotFoundException("Comic not found.");

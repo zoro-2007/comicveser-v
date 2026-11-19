@@ -5375,3 +5375,235 @@ a.bm-poster-foot:hover .bm-poster-title {
 .bmm-chap-input:focus {
   border-color: #a855f7;
 }
+
+/* ---------- OFFLINE DOWNLOADS (.gold-offline, .chaprow-wrap, .chap-dl-*, .dl-grid) ---------- */
+.pillbtn.gold-offline {
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+  color: #1a1204;
+  font-weight: 800;
+  box-shadow: 0 4px 16px rgba(251, 191, 36, 0.25);
+}
+.pillbtn.gold-offline:hover {
+  background: linear-gradient(135deg, #fbbf24, #fcd34d);
+  color: #120c02;
+}
+.chaprow.chaprow-wrap {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.chaprow-link {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px 11px 14px;
+  color: inherit;
+  text-decoration: none;
+}
+.chap-dl-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-right: 10px;
+  padding-left: 6px;
+}
+.chap-dl-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chap-dl-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.chap-dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e4e0f0;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.chap-dl-btn:hover {
+  border-color: var(--purple-2);
+  background: rgba(147, 51, 234, 0.2);
+  color: #fff;
+}
+.chap-dl-btn.saved {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--gold);
+}
+.chap-dl-btn.saved:hover {
+  background: rgba(251, 191, 36, 0.24);
+  color: #fde68a;
+}
+.chap-dl-btn.cancel,
+.chap-dl-btn.remove {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+}
+.chap-dl-btn.cancel:hover,
+.chap-dl-btn.remove:hover {
+  background: rgba(248, 113, 113, 0.22);
+  color: #fff;
+}
+.chap-dl-btn.retry {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+}
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1023px) {
+  .dl-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 639px) {
+  .dl-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+.dl-danger-btn {
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+.dl-danger-btn:hover {
+  background: rgba(248, 113, 113, 0.2);
+  color: #fff;
+}
+.dl-remove-card-btn {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.25);
+}
+.dl-remove-card-btn:hover {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fff;
+}
+.chap-dl-icon-btn,
+.chap-dl-ring-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #e4e0f0;
+  cursor: pointer;
+  transition: transform 140ms ease, color 140ms ease, background 140ms ease;
+}
+.chap-dl-icon-btn:hover {
+  color: var(--gold);
+  background: rgba(251, 191, 36, 0.12);
+  transform: scale(1.06);
+}
+.chap-dl-ring-btn:hover {
+  background: rgba(248, 113, 113, 0.14);
+}
+.chap-dl-ring {
+  width: 30px;
+  height: 30px;
+  display: block;
+}
+.chap-dl-ring.spin {
+  animation: chap-dl-spin 1s linear infinite;
+}
+@keyframes chap-dl-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- COMIC DETAIL SYNOPSIS EXPAND & 3-BUTTON ACTION ROW ---------- */
+.synop-wrap {
+  max-width: 760px;
+}
+.synop-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  color: #a855f7;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.synop-toggle:hover {
+  color: #c084fc;
+}
+.detail-btn-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  max-width: 760px;
+}
+@media (max-width: 639px) {
+  .detail-btn-row {
+    grid-template-columns: 1fr;
+  }
+}
+.cv-detail-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 120ms ease, filter 140ms ease, background 140ms ease;
+  white-space: nowrap;
+}
+.cv-detail-btn:hover {
+  filter: brightness(1.06);
+}
+.cv-detail-btn:active {
+  transform: scale(0.99);
+}
+.cv-bm-off {
+  background: #8b3ee8;
+  color: #ffffff;
+}
+.cv-bm-on {
+  background: #2f2942;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #e4e0f0;
+}
+.cv-read-btn {
+  background: #ffffff;
+  color: #111115;
+}
+.cv-offline-btn {
+  background: #fbbf24;
+  color: #1a1204;
+}

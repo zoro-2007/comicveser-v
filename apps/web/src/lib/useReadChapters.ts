@@ -23,7 +23,7 @@ export function useReadChapters(comicId: string | null) {
     let live = true;
     if (!userId) { setIds(new Set(readLocal(comicId))); setReady(true); return; }
     api<{ chapterIds: string[] }>(`/user/comics/${comicId}/read-chapters`, { credentials: "include", cache: "no-store" })
-      .then((r) => { if (live) setIds(new Set(r.chapterIds)); })
+      .then((r) => { if (live) setIds(new Set([...r.chapterIds, ...readLocal(comicId)])); })
       .catch(() => { if (live) setIds(new Set(readLocal(comicId))); })
       .finally(() => { if (live) setReady(true); });
     return () => { live = false; };

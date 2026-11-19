@@ -1,5 +1,6 @@
 "use client";
-import { usePathname } from "next/navigation";
+import { Suspense } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import PageTransition from "./PageTransition";
 
 /** Chapter reader routes render with no site chrome at all: just the artwork and the reader's own overlay. */
@@ -10,7 +11,7 @@ export const isReaderPath = (path: string | null) =>
 export const isFullBleedPath = (path: string | null) =>
   path === "/" || (!!path && /^\/comics\/[^/]+$/.test(path));
 
-export default function ChromeGate({
+function ChromeGateInner({
   header,
   footer,
   bottomNav,
@@ -22,7 +23,10 @@ export default function ChromeGate({
   children: React.ReactNode;
 }) {
   const path = usePathname();
-  if (isReaderPath(path)) return <>{children}</>;
+  const searchParams = useSearchParams();
+  const isOfflineReader = path === "/downloads" && Boolean(searchParams?.get("chapter"));
+
+  if (isReaderPath(path) || isOfflineReader) return <>{children}</>;
   const fullBleed = isFullBleedPath(path);
   return (
     <>
@@ -33,5 +37,18 @@ export default function ChromeGate({
       {footer}
       {bottomNav}
     </>
+  );
+}
+
+export default function ChromeGate(props: {
+  header: React.ReactNode;
+  footer: React.ReactNode;
+  bottomNav: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <Suspense fallback={<>{props.header}<main className="wrap py-6">{props.children}</main>{props.footer}{props.bottomNav}</>}>
+      <ChromeGateInner {...props} />
+    </Suspense>
   );
 }
