@@ -33,8 +33,8 @@ export interface ChapterDownloadState {
 const IMAGE_BATCH_LIMIT = 30;
 const MAX_BATCH_ITERATIONS = 70;
 const MAX_PAGE_RETRIES = 2;
-const PAGE_TIMEOUT_MS = 25_000;
-const CONCURRENCY = 4;
+const PAGE_TIMEOUT_MS = 45_000;
+const CONCURRENCY = 2;
 const CHANNEL_NAME = "comicverse-offline-downloads";
 
 const states = new Map<string, ChapterDownloadState>();

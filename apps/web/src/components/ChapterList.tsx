@@ -215,6 +215,18 @@ export default function ChapterList({
         </div>
       )}
 
+      {(() => {
+        const failedItem = rows
+          .map((ch) => ({ ch, st: getDownloadState(ch.id) }))
+          .find((x) => x.st?.phase === "failed" && x.st.error);
+        if (!failedItem) return null;
+        return (
+          <div className="mb-3 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            <b>Ch. {failedItem.ch.displayNumber ?? failedItem.ch.number}:</b> {failedItem.st!.error}
+          </div>
+        );
+      })()}
+
       {rows.length === 0 ? (
         <div className="empty-note">No chapters published yet.</div>
       ) : (

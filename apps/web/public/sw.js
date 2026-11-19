@@ -166,16 +166,41 @@ async function broadcastProgress(state) {
   }
 }
 
+async function hasValidImageMagicBytes(blob) {
+  const buf = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+  if (buf.length < 4) return false;
+  // PNG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  // JPEG
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  // GIF
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return true;
+  // RIFF....WEBP
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+  // ISO BMFF (AVIF / HEIF)
+  if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) return true;
+  return false;
+}
+
 async function verifyBlobInSw(blob) {
   if (!blob || blob.size === 0) throw new Error("Empty image response");
-  if (typeof createImageBitmap === "function") {
-    const bmp = await createImageBitmap(blob);
-    const w = bmp.width;
-    const h = bmp.height;
-    bmp.close();
-    if (w <= 0 || h <= 0) throw new Error("Zero-dimension image");
-    return { width: w, height: h };
+  if (blob.type && !blob.type.startsWith("image/") && blob.type !== "application/octet-stream") {
+    throw new Error(`Unexpected content type: ${blob.type}`);
   }
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bmp = await createImageBitmap(blob);
+      const w = bmp.width;
+      const h = bmp.height;
+      bmp.close();
+      if (w > 0 && h > 0) return { width: w, height: h };
+    } catch {
+      // Mobile SWs can throw OOM on very tall webtoon strips; fall back to magic-byte validation
+    }
+  }
+  const ok = await hasValidImageMagicBytes(blob);
+  if (!ok) throw new Error("Invalid or corrupt image data");
   return { width: 0, height: 0 };
 }
 
@@ -231,7 +256,7 @@ async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
 }
 
 
-async function fetchJsonTimeout(url, headers, parentSignal, timeoutMs = 25000) {
+async function fetchJsonTimeout(url, headers, parentSignal, timeoutMs = 45000) {
   const tCtrl = new AbortController();
   const timer = setTimeout(() => tCtrl.abort(), timeoutMs);
   const onAbort = () => tCtrl.abort();
@@ -273,7 +298,7 @@ async function runBackgroundDownload(payload) {
   await updateState({ phase: "checking", completedPages: 0, totalPages: 0 });
 
   try {
-    const metaRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, authHeaders, ctrl.signal, 25000);
+    const metaRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, authHeaders, ctrl.signal, 45000);
     if (metaRes.status === 404) throw new Error("This chapter is no longer published.");
     if (!metaRes.ok) throw new Error(`Chapter check failed (${metaRes.status})`);
     const meta = await metaRes.json();
@@ -285,7 +310,7 @@ async function runBackgroundDownload(payload) {
     let from = 0;
     let total = Infinity;
     for (let b = 0; b < 70; b++) {
-      const imgRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, authHeaders, ctrl.signal, 25000);
+      const imgRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, authHeaders, ctrl.signal, 45000);
       if (!imgRes.ok) throw new Error(`Could not load chapter pages (${imgRes.status})`);
       const batch = await imgRes.json();
       total = typeof batch.total === "number" ? batch.total : collected.length;
@@ -350,7 +375,7 @@ async function runBackgroundDownload(payload) {
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(4, totalPages) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(2, totalPages) }, () => worker()));
 
     await updateState({ phase: "verifying", completedPages: totalPages, totalPages });
     const totalBytes = downloadedPages.reduce((s, p) => s + p.sizeBytes, 0);
