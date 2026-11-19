@@ -230,6 +230,26 @@ async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
   throw lastErr || new Error("Image download failed");
 }
 
+
+async function fetchJsonTimeout(url, headers, parentSignal, timeoutMs = 25000) {
+  const tCtrl = new AbortController();
+  const timer = setTimeout(() => tCtrl.abort(), timeoutMs);
+  const onAbort = () => tCtrl.abort();
+  parentSignal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await fetch(url, {
+      method: "GET",
+      credentials: "include",
+      headers,
+      cache: "no-store",
+      signal: tCtrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function runBackgroundDownload(payload) {
   const { apiBase, authHeaders, comic, chapter } = payload;
   if (activeDownloads.has(chapter.id)) return;
@@ -253,12 +273,7 @@ async function runBackgroundDownload(payload) {
   await updateState({ phase: "checking", completedPages: 0, totalPages: 0 });
 
   try {
-    const metaRes = await fetch(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, {
-      credentials: "include",
-      headers: authHeaders,
-      cache: "no-store",
-      signal: ctrl.signal,
-    });
+    const metaRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, authHeaders, ctrl.signal, 25000);
     if (metaRes.status === 404) throw new Error("This chapter is no longer published.");
     if (!metaRes.ok) throw new Error(`Chapter check failed (${metaRes.status})`);
     const meta = await metaRes.json();
@@ -270,12 +285,7 @@ async function runBackgroundDownload(payload) {
     let from = 0;
     let total = Infinity;
     for (let b = 0; b < 70; b++) {
-      const imgRes = await fetch(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, {
-        credentials: "include",
-        headers: authHeaders,
-        cache: "no-store",
-        signal: ctrl.signal,
-      });
+      const imgRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, authHeaders, ctrl.signal, 25000);
       if (!imgRes.ok) throw new Error(`Could not load chapter pages (${imgRes.status})`);
       const batch = await imgRes.json();
       total = typeof batch.total === "number" ? batch.total : collected.length;

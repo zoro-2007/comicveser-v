@@ -49,7 +49,7 @@ export default function OfflineSwRegistrar() {
 
     const registerAndWarm = async () => {
       try {
-        const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+        const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
         if (navigator.storage?.persist) { void navigator.storage.persist().catch(() => {}); }
         if (cancelled) return;
 
@@ -58,6 +58,7 @@ export default function OfflineSwRegistrar() {
           target.postMessage({ type: "CACHE_URLS", urls: collectStaticAssetUrls() });
         };
 
+        void reg.update().catch(() => {});
         if (reg.active) postUrls(reg.active);
         if (reg.installing) {
           reg.installing.addEventListener("statechange", () => {

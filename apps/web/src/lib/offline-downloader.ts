@@ -39,6 +39,7 @@ const CHANNEL_NAME = "comicverse-offline-downloads";
 
 const states = new Map<string, ChapterDownloadState>();
 const controllers = new Map<string, AbortController>();
+const swAcked = new Set<string>();
 const listeners = new Set<() => void>();
 let bridgeInitialized = false;
 
@@ -67,6 +68,7 @@ function initSwBridge() {
       bc.onmessage = (event) => {
         const data = event.data;
         if (data?.type === "DOWNLOAD_PROGRESS" && data.state?.chapterId) {
+          swAcked.add(data.state.chapterId);
           setState(data.state.chapterId, data.state as ChapterDownloadState);
         }
       };
@@ -79,7 +81,8 @@ function initSwBridge() {
     navigator.serviceWorker.addEventListener("message", (event) => {
       const data = event.data;
       if (data?.type === "DOWNLOAD_PROGRESS" && data.state?.chapterId) {
-        setState(data.state.chapterId, data.state as ChapterDownloadState);
+        swAcked.add(data.state.chapterId);
+          setState(data.state.chapterId, data.state as ChapterDownloadState);
       } else if (data?.type === "DOWNLOAD_STATES_SNAPSHOT" && Array.isArray(data.states)) {
         for (const st of data.states as ChapterDownloadState[]) {
           if (st?.chapterId) states.set(st.chapterId, st);
@@ -337,6 +340,7 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
 
   // Prefer Service Worker background execution so downloads survive page navigation & mobile backgrounding
   if (typeof navigator !== "undefined" && "serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    swAcked.delete(chapter.id);
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
@@ -371,7 +375,28 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
         },
       },
     });
-    return true;
+    // Watchdog: if an older SW did not acknowledge within 2s, fall back to in-page download automatically
+    const ackOk = await new Promise<boolean>((resolve) => {
+      const check = () => {
+        if (swAcked.has(chapter.id)) {
+          cleanup();
+          resolve(true);
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(swAcked.has(chapter.id));
+      }, 2000);
+      const unsub = subscribeDownloads(check);
+      const cleanup = () => {
+        clearTimeout(timer);
+        unsub();
+      };
+      check();
+    });
+    if (ackOk) {
+      return true;
+    }
   }
 
   // Fallback in-page execution when SW is not controlling yet
