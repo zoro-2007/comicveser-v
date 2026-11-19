@@ -3,7 +3,6 @@
 import { API, buildAuthHeaders } from "./api";
 import type { Chapter, Comic } from "./comics";
 import type { ChapterMeta, Img, ImgPage } from "@/components/Reader";
-import type { ExtPages } from "./sources";
 import {
   deleteDownloadedChapter,
   getDownloadedCover,
@@ -23,21 +22,25 @@ export type DownloadPhase =
 export interface ChapterDownloadState {
   chapterId: string;
   comicId: string;
+  comicTitle?: string;
+  chapterNumber?: string | number;
   phase: DownloadPhase;
   completedPages: number;
   totalPages: number;
   error?: string;
 }
 
-const IMAGE_BATCH_LIMIT = 20;
-const MAX_BATCH_ITERATIONS = 50;
+const IMAGE_BATCH_LIMIT = 30;
+const MAX_BATCH_ITERATIONS = 70;
 const MAX_PAGE_RETRIES = 2;
-const PAGE_TIMEOUT_MS = 20_000;
-const CONCURRENCY = 10;
+const PAGE_TIMEOUT_MS = 25_000;
+const CONCURRENCY = 4;
+const CHANNEL_NAME = "comicverse-offline-downloads";
 
 const states = new Map<string, ChapterDownloadState>();
 const controllers = new Map<string, AbortController>();
 const listeners = new Set<() => void>();
+let bridgeInitialized = false;
 
 function notify() {
   for (const fn of listeners) {
@@ -49,20 +52,68 @@ function notify() {
   }
 }
 
+function setState(chapterId: string, next: ChapterDownloadState) {
+  states.set(chapterId, next);
+  notify();
+}
+
+function initSwBridge() {
+  if (bridgeInitialized || typeof window === "undefined") return;
+  bridgeInitialized = true;
+
+  if (typeof BroadcastChannel !== "undefined") {
+    try {
+      const bc = new BroadcastChannel(CHANNEL_NAME);
+      bc.onmessage = (event) => {
+        const data = event.data;
+        if (data?.type === "DOWNLOAD_PROGRESS" && data.state?.chapterId) {
+          setState(data.state.chapterId, data.state as ChapterDownloadState);
+        }
+      };
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
+  }
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      const data = event.data;
+      if (data?.type === "DOWNLOAD_PROGRESS" && data.state?.chapterId) {
+        setState(data.state.chapterId, data.state as ChapterDownloadState);
+      } else if (data?.type === "DOWNLOAD_STATES_SNAPSHOT" && Array.isArray(data.states)) {
+        for (const st of data.states as ChapterDownloadState[]) {
+          if (st?.chapterId) states.set(st.chapterId, st);
+        }
+        notify();
+      }
+    });
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: "GET_DOWNLOAD_STATES" });
+    }
+  }
+}
+
 export function subscribeDownloads(fn: () => void): () => void {
+  initSwBridge();
   listeners.add(fn);
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: "GET_DOWNLOAD_STATES" });
+  }
   return () => {
     listeners.delete(fn);
   };
 }
 
 export function getDownloadState(chapterId: string): ChapterDownloadState | undefined {
+  initSwBridge();
   return states.get(chapterId);
 }
 
-function setState(chapterId: string, next: ChapterDownloadState) {
-  states.set(chapterId, next);
-  notify();
+export function getAllActiveDownloads(): ChapterDownloadState[] {
+  initSwBridge();
+  return Array.from(states.values()).filter(
+    (s) => s.phase === "checking" || s.phase === "downloading" || s.phase === "verifying",
+  );
 }
 
 export function clearDownloadState(chapterId: string) {
@@ -74,6 +125,12 @@ export function cancelChapterDownload(chapterId: string) {
   const ctrl = controllers.get(chapterId);
   if (ctrl) {
     ctrl.abort();
+  }
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: "CANCEL_CHAPTER_DOWNLOAD",
+      chapterId,
+    });
   }
 }
 
@@ -130,10 +187,6 @@ async function fetchJsonWithSignal<T>(path: string, signal: AbortSignal): Promis
   return { status: res.status, data };
 }
 
-/**
- * Verifies that a Blob actually decodes into a non-empty renderable image
- * before we ever persist it or mark a chapter saved.
- */
 async function verifyRenderableImageBlob(blob: Blob): Promise<{ width: number; height: number }> {
   if (!blob || blob.size === 0) {
     throw new Error("Empty image response");
@@ -202,7 +255,6 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
       if (!res.ok) {
         const statusErr = new Error(`Image request failed (${res.status})`) as Error & { status?: number };
         statusErr.status = res.status;
-        // Do not retry permanent 4xx errors (except 408/429)
         if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
           throw statusErr;
         }
@@ -222,7 +274,7 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
         throw err;
       }
       if (attempt < MAX_PAGE_RETRIES) {
-        await sleep(500 * (attempt + 1), parentSignal);
+        await sleep(400 * (attempt + 1), parentSignal);
       }
     } finally {
       clearTimeout(timer);
@@ -234,35 +286,16 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
 }
 
 async function resolveAllChapterImages(
-  meta: ChapterMeta,
+  chapterId: string,
   signal: AbortSignal,
-): Promise<{ items: Img[]; sourceType: "uploaded" | "provider" }> {
-  if (meta.external) {
-    const { sourceId, mangaId, chapterId } = meta.external;
-    const { data } = await fetchJsonWithSignal<ExtPages>(
-      `/sources/${encodeURIComponent(sourceId)}/manga/${encodeURIComponent(mangaId)}/chapters/${encodeURIComponent(chapterId)}/pages`,
-      signal,
-    );
-    const items: Img[] = (data.pages ?? [])
-      .slice()
-      .sort((a, b) => a.pageNumber - b.pageNumber)
-      .map((p, idx) => ({
-        id: `p${p.pageNumber}`,
-        position: typeof p.pageNumber === "number" && p.pageNumber > 0 ? p.pageNumber - 1 : idx,
-        width: p.width ?? 0,
-        height: p.height ?? 0,
-        url: p.imageUrl,
-      }));
-    return { items, sourceType: "provider" };
-  }
-
+): Promise<Img[]> {
   const collected: Img[] = [];
   let from = 0;
   let total = Infinity;
 
   for (let batchIdx = 0; batchIdx < MAX_BATCH_ITERATIONS; batchIdx++) {
     const { data } = await fetchJsonWithSignal<ImgPage>(
-      `/chapters/${encodeURIComponent(meta.id)}/images?from=${from}&limit=${IMAGE_BATCH_LIMIT}`,
+      `/chapters/${encodeURIComponent(chapterId)}/images?from=${from}&limit=${IMAGE_BATCH_LIMIT}`,
       signal,
     );
     total = typeof data.total === "number" ? data.total : collected.length;
@@ -274,17 +307,26 @@ async function resolveAllChapterImages(
   }
 
   collected.sort((a, b) => a.position - b.position);
-  return { items: collected, sourceType: "uploaded" };
+  return collected;
 }
 
 export async function startChapterDownload(comic: Comic, chapter: Chapter): Promise<boolean> {
-  if (controllers.has(chapter.id)) {
+  initSwBridge();
+  const existingState = states.get(chapter.id);
+  if (
+    controllers.has(chapter.id) ||
+    existingState?.phase === "checking" ||
+    existingState?.phase === "downloading" ||
+    existingState?.phase === "verifying"
+  ) {
     return false;
   }
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
       phase: "failed",
       completedPages: 0,
       totalPages: 0,
@@ -293,19 +335,60 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     return false;
   }
 
+  // Prefer Service Worker background execution so downloads survive page navigation & mobile backgrounding
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    setState(chapter.id, {
+      chapterId: chapter.id,
+      comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
+      phase: "checking",
+      completedPages: 0,
+      totalPages: 0,
+    });
+    navigator.serviceWorker.controller.postMessage({
+      type: "START_CHAPTER_DOWNLOAD",
+      payload: {
+        apiBase: API,
+        authHeaders: buildAuthHeaders(),
+        comic: {
+          id: comic.id,
+          slug: comic.slug,
+          title: comic.title,
+          author: comic.author,
+          artist: comic.artist,
+          status: comic.status,
+          type: comic.type,
+          hue: comic.hue,
+          coverUrl: comic.coverUrl,
+        },
+        chapter: {
+          id: chapter.id,
+          number: chapter.number,
+          displayNumber: chapter.displayNumber,
+          title: chapter.title,
+          publishedAt: chapter.publishedAt,
+        },
+      },
+    });
+    return true;
+  }
+
+  // Fallback in-page execution when SW is not controlling yet
   const ctrl = new AbortController();
   controllers.set(chapter.id, ctrl);
 
   setState(chapter.id, {
     chapterId: chapter.id,
     comicId: comic.id,
+    comicTitle: comic.title,
+    chapterNumber: chapter.displayNumber ?? chapter.number,
     phase: "checking",
     completedPages: 0,
     totalPages: 0,
   });
 
   try {
-    // 1. Recheck publication status & chapter-to-comic relationship via existing API.
     let meta: ChapterMeta;
     try {
       const res = await fetchJsonWithSignal<ChapterMeta>(`/chapters/${encodeURIComponent(chapter.id)}`, ctrl.signal);
@@ -322,8 +405,8 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
       throw new Error("Chapter does not belong to this published comic.");
     }
 
-    // 2. Resolve every page in order (including paginated batches for uploaded chapters).
-    const { items, sourceType } = await resolveAllChapterImages(meta, ctrl.signal);
+    const items = await resolveAllChapterImages(meta.id, ctrl.signal);
+    const sourceType = meta.external ? "provider" : "uploaded";
     if (items.length === 0) {
       throw new Error("This chapter has no downloadable pages.");
     }
@@ -332,12 +415,13 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
       phase: "downloading",
       completedPages: 0,
       totalPages,
     });
 
-    // 3. Download cover image if needed (best-effort so offline cover card renders).
     let coverBlob: Blob | null = null;
     {
       const existingCover = await getDownloadedCover(comic.id).catch(() => null);
@@ -358,7 +442,6 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
       }
     }
 
-    // 4. Download & verify all chapter page images with bounded concurrency.
     const downloadedPages: Array<{
       position: number;
       width: number;
@@ -395,6 +478,8 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
         setState(chapter.id, {
           chapterId: chapter.id,
           comicId: comic.id,
+          comicTitle: comic.title,
+          chapterNumber: chapter.displayNumber ?? chapter.number,
           phase: "downloading",
           completedPages: completedCount,
           totalPages,
@@ -409,10 +494,11 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
       throw new DOMException("Aborted", "AbortError");
     }
 
-    // 5. Persist atomically to IndexedDB only after all pages are verified.
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
       phase: "verifying",
       completedPages: totalPages,
       totalPages,
@@ -450,19 +536,22 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
       phase: "saved",
       completedPages: totalPages,
       totalPages,
     });
     return true;
   } catch (err) {
-    // Ensure no partial chapter data remains in IndexedDB.
     await deleteDownloadedChapter(chapter.id).catch(() => {});
 
     if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
       setState(chapter.id, {
         chapterId: chapter.id,
         comicId: comic.id,
+        comicTitle: comic.title,
+        chapterNumber: chapter.displayNumber ?? chapter.number,
         phase: "canceled",
         completedPages: 0,
         totalPages: 0,
@@ -480,6 +569,8 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     setState(chapter.id, {
       chapterId: chapter.id,
       comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
       phase: "failed",
       completedPages: 0,
       totalPages: 0,
@@ -491,10 +582,24 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
   }
 }
 
+function waitForChapterFinish(chapterId: string): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      const st = states.get(chapterId);
+      if (!st || st.phase === "saved" || st.phase === "failed" || st.phase === "canceled") {
+        unsub();
+        resolve();
+      }
+    };
+    const unsub = subscribeDownloads(check);
+    check();
+  });
+}
+
 export async function startBulkChapterDownloads(
   comic: Comic,
   chapters: Chapter[],
-  maxConcurrentChapters = 3,
+  maxConcurrentChapters = 5,
 ): Promise<void> {
   if (chapters.length === 0) return;
   let idx = 0;
@@ -503,7 +608,10 @@ export async function startBulkChapterDownloads(
       const i = idx++;
       if (i >= chapters.length) return;
       const ch = chapters[i];
-      await startChapterDownload(comic, ch);
+      const started = await startChapterDownload(comic, ch);
+      if (started) {
+        await waitForChapterFinish(ch.id);
+      }
     }
   }
   const workers = Array.from(

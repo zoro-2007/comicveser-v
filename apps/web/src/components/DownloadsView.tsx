@@ -7,6 +7,8 @@ import { ArrowLeft, Download, HardDrive, Trash2, WifiOff } from "lucide-react";
 import { API } from "@/lib/api";
 import { Cover } from "./ComicCard";
 import OfflineReader from "./OfflineReader";
+import CircularDownloadProgress from "./CircularDownloadProgress";
+import { cancelChapterDownload, getAllActiveDownloads, subscribeDownloads, type ChapterDownloadState } from "@/lib/offline-downloader";
 import {
   deleteDownloadedChapter,
   deleteDownloadedComic,
@@ -101,6 +103,7 @@ export default function DownloadsView() {
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [activeDownloads, setActiveDownloads] = useState<ChapterDownloadState[]>([]);
 
   const loadData = useCallback(async () => {
     try {
@@ -116,11 +119,17 @@ export default function DownloadsView() {
 
   useEffect(() => {
     void loadData();
+    setActiveDownloads(getAllActiveDownloads());
+    const unsub = subscribeDownloads(() => {
+      setActiveDownloads(getAllActiveDownloads());
+      void loadData();
+    });
     const updateOnline = () => setOffline(typeof navigator !== "undefined" && navigator.onLine === false);
     updateOnline();
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
     return () => {
+      unsub();
       window.removeEventListener("online", updateOnline);
       window.removeEventListener("offline", updateOnline);
     };
@@ -205,6 +214,44 @@ export default function DownloadsView() {
           )}
         </div>
       </section>
+
+      {activeDownloads.length > 0 && (
+        <section className="panel" data-layer="Active Downloads">
+          <div className="panel-h2">
+            <span className="ic" aria-hidden="true">↓</span>
+            <h2>
+              Downloading <span style={{ color: "var(--muted)", fontSize: 13 }}>({activeDownloads.length})</span>
+            </h2>
+          </div>
+          <div className="chap-list">
+            {activeDownloads.map((dl) => {
+              const pct = dl.phase === "verifying" ? 100 : dl.totalPages > 0 ? Math.round((dl.completedPages / dl.totalPages) * 100) : 0;
+              const chLabel = String(dl.chapterNumber ?? "");
+              return (
+                <div key={dl.chapterId} className="chaprow chaprow-wrap">
+                  <div className="chaprow-link">
+                    <span className="min-w-0 truncate">
+                      <span className="n">{dl.comicTitle || "Downloading"}</span>
+                      {chLabel && <span className="t">— Chapter {chLabel}</span>}
+                    </span>
+                    <span className="w">
+                      {dl.phase === "checking" ? "Preparing…" : dl.phase === "verifying" ? "Saving…" : `${dl.completedPages}/${dl.totalPages}`}
+                    </span>
+                  </div>
+                  <div className="chap-dl-actions">
+                    <CircularDownloadProgress
+                      pct={pct}
+                      indeterminate={dl.phase === "checking" || dl.totalPages === 0}
+                      onCancel={() => cancelChapterDownload(dl.chapterId)}
+                      chapterLabel={chLabel}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {loading ? (
         <section className="panel">

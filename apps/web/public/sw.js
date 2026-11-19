@@ -1,4 +1,11 @@
-const CACHE_NAME = "comicverse-offline-shell-v1";
+const CACHE_NAME = "comicverse-offline-shell-v2";
+const DB_NAME = "comicverse-offline-v1";
+const DB_VERSION = 1;
+const STORE_COMICS = "comics";
+const STORE_CHAPTERS = "chapters";
+const STORE_PAGES = "pages";
+const STORE_COVERS = "covers";
+const CHANNEL_NAME = "comicverse-offline-downloads";
 
 const PRECACHE_URLS = [
   "/downloads",
@@ -10,6 +17,8 @@ const PRECACHE_URLS = [
 ];
 
 const PRIVATE_PREFIXES = ["/api/", "/auth/", "/user/", "/admin/", "/creator/"];
+const activeDownloads = new Map(); // chapterId -> { state, controller }
+const bc = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(CHANNEL_NAME) : null;
 
 function isPrivateOrApiPath(pathname) {
   return PRIVATE_PREFIXES.some((prefix) => pathname === prefix.slice(0, -1) || pathname.startsWith(prefix));
@@ -54,6 +63,336 @@ async function cacheUrlList(urls) {
   );
 }
 
+function openOfflineDb() {
+  return new Promise((resolve, reject) => {
+    const req = self.indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_COMICS)) {
+        db.createObjectStore(STORE_COMICS, { keyPath: "comicId" });
+      }
+      if (!db.objectStoreNames.contains(STORE_CHAPTERS)) {
+        const ch = db.createObjectStore(STORE_CHAPTERS, { keyPath: "chapterId" });
+        ch.createIndex("by_comic", "comicId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_PAGES)) {
+        const pg = db.createObjectStore(STORE_PAGES, { keyPath: "key" });
+        pg.createIndex("by_chapter", "chapterId", { unique: false });
+        pg.createIndex("by_comic", "comicId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_COVERS)) {
+        db.createObjectStore(STORE_COVERS, { keyPath: "comicId" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDB error"));
+  });
+}
+
+function reqPromise(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IDB request failed"));
+  });
+}
+
+function txPromise(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("IDB tx failed"));
+    tx.onabort = () => reject(tx.error || new Error("IDB tx aborted"));
+  });
+}
+
+async function deleteChapterPagesFromDb(chapterId) {
+  const db = await openOfflineDb();
+  const tx = db.transaction(STORE_PAGES, "readwrite");
+  const idx = tx.objectStore(STORE_PAGES).index("by_chapter");
+  const keys = await reqPromise(idx.getAllKeys(IDBKeyRange.only(chapterId)));
+  const store = tx.objectStore(STORE_PAGES);
+  for (const k of keys) store.delete(k);
+  await txPromise(tx);
+}
+
+async function saveChapterToDb({ comic, chapter, pages, coverBlob }) {
+  await deleteChapterPagesFromDb(chapter.chapterId);
+  const db = await openOfflineDb();
+  const now = Date.now();
+  const tx = db.transaction([STORE_COMICS, STORE_CHAPTERS, STORE_PAGES, STORE_COVERS], "readwrite");
+  const comicsStore = tx.objectStore(STORE_COMICS);
+  const chaptersStore = tx.objectStore(STORE_CHAPTERS);
+  const pagesStore = tx.objectStore(STORE_PAGES);
+  const coversStore = tx.objectStore(STORE_COVERS);
+
+  const existingCover = await reqPromise(coversStore.get(comic.comicId));
+  const hasCoverBlob = Boolean(coverBlob || existingCover);
+  if (coverBlob && coverBlob.size > 0) {
+    coversStore.put({
+      comicId: comic.comicId,
+      mimeType: coverBlob.type || "image/jpeg",
+      sizeBytes: coverBlob.size,
+      blob: coverBlob,
+    });
+  }
+
+  comicsStore.put({ ...comic, hasCoverBlob, updatedAt: now });
+
+  for (const p of pages) {
+    pagesStore.put({
+      key: `${chapter.chapterId}:${p.position}`,
+      chapterId: chapter.chapterId,
+      comicId: comic.comicId,
+      position: p.position,
+      width: p.width,
+      height: p.height,
+      mimeType: p.mimeType,
+      sizeBytes: p.sizeBytes,
+      blob: p.blob,
+    });
+  }
+
+  chaptersStore.put({ ...chapter, downloadedAt: now });
+  await txPromise(tx);
+}
+
+async function broadcastProgress(state) {
+  const msg = { type: "DOWNLOAD_PROGRESS", state };
+  if (bc) {
+    try { bc.postMessage(msg); } catch {}
+  }
+  const allClients = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
+  for (const c of allClients) {
+    try { c.postMessage(msg); } catch {}
+  }
+}
+
+async function verifyBlobInSw(blob) {
+  if (!blob || blob.size === 0) throw new Error("Empty image response");
+  if (typeof createImageBitmap === "function") {
+    const bmp = await createImageBitmap(blob);
+    const w = bmp.width;
+    const h = bmp.height;
+    bmp.close();
+    if (w <= 0 || h <= 0) throw new Error("Zero-dimension image");
+    return { width: w, height: h };
+  }
+  return { width: 0, height: 0 };
+}
+
+function isSameOriginOrApi(url, apiBase) {
+  if (url.startsWith("/")) return true;
+  try {
+    const u = new URL(url, self.location.origin);
+    if (u.origin === self.location.origin) return true;
+    if (/^https?:\/\//i.test(apiBase)) {
+      return u.origin === new URL(apiBase).origin;
+    }
+  } catch {}
+  return false;
+}
+
+async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
+  let lastErr;
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    if (parentSignal.aborted) throw new DOMException("Aborted", "AbortError");
+    const tCtrl = new AbortController();
+    const timer = setTimeout(() => tCtrl.abort(), 25_000);
+    const onAbort = () => tCtrl.abort();
+    parentSignal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        credentials: internal ? "include" : "omit",
+        headers: internal ? authHeaders : undefined,
+        cache: "no-store",
+        signal: tCtrl.signal,
+      });
+      if (!res.ok) {
+        const err = new Error(`Image fetch failed (${res.status})`);
+        err.status = res.status;
+        if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) throw err;
+        throw err;
+      }
+      const blob = await res.blob();
+      const dims = await verifyBlobInSw(blob);
+      return { blob, width: dims.width, height: dims.height };
+    } catch (err) {
+      if (parentSignal.aborted) throw new DOMException("Aborted", "AbortError");
+      lastErr = err;
+      if (err && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429) throw err;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    } finally {
+      clearTimeout(timer);
+      parentSignal.removeEventListener("abort", onAbort);
+    }
+  }
+  throw lastErr || new Error("Image download failed");
+}
+
+async function runBackgroundDownload(payload) {
+  const { apiBase, authHeaders, comic, chapter } = payload;
+  if (activeDownloads.has(chapter.id)) return;
+
+  const ctrl = new AbortController();
+  const updateState = async (patch) => {
+    const prev = activeDownloads.get(chapter.id)?.state || {
+      chapterId: chapter.id,
+      comicId: comic.id,
+      comicTitle: comic.title,
+      chapterNumber: chapter.displayNumber ?? chapter.number,
+      phase: "checking",
+      completedPages: 0,
+      totalPages: 0,
+    };
+    const next = { ...prev, ...patch };
+    activeDownloads.set(chapter.id, { state: next, controller: ctrl });
+    await broadcastProgress(next);
+  };
+
+  await updateState({ phase: "checking", completedPages: 0, totalPages: 0 });
+
+  try {
+    const metaRes = await fetch(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, {
+      credentials: "include",
+      headers: authHeaders,
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (metaRes.status === 404) throw new Error("This chapter is no longer published.");
+    if (!metaRes.ok) throw new Error(`Chapter check failed (${metaRes.status})`);
+    const meta = await metaRes.json();
+    if (!meta?.comic || meta.comic.id !== comic.id) {
+      throw new Error("Chapter does not belong to this published comic.");
+    }
+
+    const collected = [];
+    let from = 0;
+    let total = Infinity;
+    for (let b = 0; b < 70; b++) {
+      const imgRes = await fetch(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, {
+        credentials: "include",
+        headers: authHeaders,
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      if (!imgRes.ok) throw new Error(`Could not load chapter pages (${imgRes.status})`);
+      const batch = await imgRes.json();
+      total = typeof batch.total === "number" ? batch.total : collected.length;
+      const items = Array.isArray(batch.items) ? batch.items : [];
+      if (items.length === 0) break;
+      collected.push(...items);
+      from += items.length;
+      if (collected.length >= total) break;
+    }
+
+    collected.sort((a, b) => a.position - b.position);
+    if (collected.length === 0) throw new Error("This chapter has no downloadable pages.");
+
+    const totalPages = collected.length;
+    await updateState({ phase: "downloading", completedPages: 0, totalPages });
+
+    // Cover fetch (best-effort)
+    let coverBlob = null;
+    try {
+      const db = await openOfflineDb();
+      const tx = db.transaction(STORE_COVERS, "readonly");
+      const existing = await reqPromise(tx.objectStore(STORE_COVERS).get(comic.id));
+      if (!existing) {
+        const apiCoverUrl = `${apiBase}/comics/${encodeURIComponent(comic.id)}/cover/file`;
+        const candidates = comic.coverUrl && isSameOriginOrApi(comic.coverUrl, apiBase)
+          ? [comic.coverUrl, apiCoverUrl]
+          : [apiCoverUrl];
+        for (const cUrl of candidates) {
+          try {
+            const res = await fetchImageWithRetry(cUrl, true, authHeaders, ctrl.signal);
+            coverBlob = res.blob;
+            break;
+          } catch {}
+        }
+      }
+    } catch {}
+
+    const downloadedPages = new Array(totalPages);
+    let nextIdx = 0;
+    let completed = 0;
+
+    async function worker() {
+      while (true) {
+        const idx = nextIdx++;
+        if (idx >= totalPages) return;
+        const item = collected[idx];
+        const internal = isSameOriginOrApi(item.url, apiBase);
+        const targetUrl = internal
+          ? item.url
+          : `${apiBase}/chapters/${encodeURIComponent(chapter.id)}/pages/${idx}/file`;
+        const { blob, width, height } = await fetchImageWithRetry(targetUrl, true, authHeaders, ctrl.signal);
+        downloadedPages[idx] = {
+          position: idx,
+          width: item.width > 0 ? item.width : width,
+          height: item.height > 0 ? item.height : height,
+          mimeType: blob.type || "image/jpeg",
+          sizeBytes: blob.size,
+          blob,
+        };
+        completed++;
+        await updateState({ phase: "downloading", completedPages: completed, totalPages });
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(4, totalPages) }, () => worker()));
+
+    await updateState({ phase: "verifying", completedPages: totalPages, totalPages });
+    const totalBytes = downloadedPages.reduce((s, p) => s + p.sizeBytes, 0);
+
+    await saveChapterToDb({
+      comic: {
+        comicId: comic.id,
+        slug: comic.slug,
+        title: comic.title,
+        author: comic.author,
+        artist: comic.artist,
+        status: comic.status,
+        type: comic.type,
+        hue: comic.hue,
+        coverUrl: comic.coverUrl,
+      },
+      chapter: {
+        chapterId: chapter.id,
+        comicId: comic.id,
+        number: meta.number ?? chapter.number,
+        displayNumber: meta.displayNumber ?? chapter.displayNumber,
+        title: meta.title ?? chapter.title,
+        publishedAt: chapter.publishedAt,
+        pageCount: totalPages,
+        totalBytes,
+        sourceType: meta.external ? "provider" : "uploaded",
+      },
+      pages: downloadedPages,
+      coverBlob,
+    });
+
+    await updateState({ phase: "saved", completedPages: totalPages, totalPages });
+  } catch (err) {
+    await deleteChapterPagesFromDb(chapter.id).catch(() => {});
+    const isAbort = ctrl.signal.aborted || (err && err.name === "AbortError");
+    const isQuota = err && (err.name === "QuotaExceededError" || err.code === 22);
+    const errorMsg = isAbort
+      ? "Download canceled."
+      : isQuota
+      ? "Storage quota exceeded. Remove some downloads to free space."
+      : err?.message || "Download failed.";
+    await updateState({
+      phase: isAbort ? "canceled" : "failed",
+      completedPages: 0,
+      totalPages: 0,
+      error: errorMsg,
+    });
+  } finally {
+    activeDownloads.delete(chapter.id);
+  }
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
@@ -80,6 +419,16 @@ self.addEventListener("message", (event) => {
   if (!data || typeof data !== "object") return;
   if (data.type === "CACHE_URLS" && Array.isArray(data.urls)) {
     event.waitUntil(cacheUrlList(data.urls));
+  } else if (data.type === "START_CHAPTER_DOWNLOAD" && data.payload) {
+    event.waitUntil(runBackgroundDownload(data.payload));
+  } else if (data.type === "CANCEL_CHAPTER_DOWNLOAD" && data.chapterId) {
+    const entry = activeDownloads.get(data.chapterId);
+    if (entry) entry.controller.abort();
+  } else if (data.type === "GET_DOWNLOAD_STATES") {
+    const list = Array.from(activeDownloads.values()).map((v) => v.state);
+    if (event.source) {
+      event.source.postMessage({ type: "DOWNLOAD_STATES_SNAPSHOT", states: list });
+    }
   }
 });
 
@@ -98,7 +447,6 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (isPrivateOrApiPath(url.pathname)) return;
 
-  // Navigation requests when offline: serve /downloads from cache (including / and /downloads?comic=...&chapter=...)
   if (req.mode === "navigate" && url.pathname === "/downloads") {
     event.respondWith(
       (async () => {
@@ -106,7 +454,6 @@ self.addEventListener("fetch", (event) => {
         try {
           const networkRes = await fetch(req);
           if (networkRes && networkRes.ok) {
-            // Store under canonical /downloads key for fresh-tab offline opens
             await cache.put("/downloads", networkRes.clone());
           }
           return networkRes;
@@ -133,7 +480,7 @@ self.addEventListener("fetch", (event) => {
           const cachedDownloads = await cache.match("/downloads");
           if (cachedDownloads) return cachedDownloads;
           return new Response(
-            "<!doctype html><html><body style=\x27background:#131118;color:#f5f3fa;font-family:system-ui,sans-serif;padding:24px\x27><h1>You are offline</h1><p>Open ComicVerse once while online to enable offline Downloads.</p></body></html>",
+            "<!doctype html><html><body style='background:#131118;color:#f5f3fa;font-family:system-ui,sans-serif;padding:24px'><h1>You are offline</h1><p>Open ComicVerse once while online to enable offline Downloads.</p></body></html>",
             { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } },
           );
         }
@@ -142,7 +489,6 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Immutable Next.js static assets & app icons
   if (isStaticAsset(url.pathname)) {
     event.respondWith(
       (async () => {

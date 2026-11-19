@@ -50,6 +50,7 @@ export default function OfflineSwRegistrar() {
     const registerAndWarm = async () => {
       try {
         const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+        if (navigator.storage?.persist) { void navigator.storage.persist().catch(() => {}); }
         if (cancelled) return;
 
         const postUrls = (target: ServiceWorker | null | undefined) => {

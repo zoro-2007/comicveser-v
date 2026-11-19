@@ -70,9 +70,23 @@ export class ChaptersService {
     const chapter = await this.db.chapter.findFirst({ where: { id, ...this.liveWhere }, include: { sourceChapter: true } });
     if (!chapter) throw new NotFoundException("Chapter not found.");
     if (chapter.sourceChapter) {
-      const sourcePages = await this.sources.publishedChapterPages(id, from, limit);
+      const sourcePages = await this.sources.publishedChapterPages(id, 0, 2000);
       if (!sourcePages) throw new NotFoundException("Chapter not found.");
-      return sourcePages;
+      if (sourcePages.items.length > 0) {
+        if (this.pageUrlCache.size > 200) {
+          const firstKey = this.pageUrlCache.keys().next().value;
+          if (firstKey) this.pageUrlCache.delete(firstKey);
+        }
+        this.pageUrlCache.set(id, {
+          expiresAt: Date.now() + 5 * 60_000,
+          urls: sourcePages.items.map((it) => it.url),
+        });
+      }
+      return {
+        total: sourcePages.total,
+        from,
+        items: sourcePages.items.slice(from, from + limit),
+      };
     }
     const [total, rows] = await this.db.$transaction([
       this.db.chapterImage.count({ where: { chapterId: id } }),
