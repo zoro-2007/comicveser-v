@@ -1,11 +1,17 @@
 import {
   DOWNLOADS_PATH, deleteDownload, getDownload, installOfflineWorker, listDownloads, localImagePath,
 } from "./storage.mjs";
+import "./access.js";
+const access = globalThis.ComicVerseDownloadAccess;
 
 const main = document.querySelector("#content");
 const header = document.querySelector("#site-header");
 const status = document.querySelector("#connection");
 const home = document.querySelector("#home-link");
+let generation = 0;
+let permissionTimer;
+let canRenderSaved = false;
+let wasPurging = false;
 
 function element(tag, { cls, text, attrs = {} } = {}, ...children) {
   const node = document.createElement(tag);
@@ -25,7 +31,12 @@ function updateConnection() {
 window.addEventListener("online", updateConnection);
 window.addEventListener("offline", updateConnection);
 updateConnection();
-if (navigator.onLine) void installOfflineWorker().catch(() => {});
+if (navigator.onLine && navigator.serviceWorker) {
+  // Do not take over a current /sw.js installation when this older shell is visited.
+  void navigator.serviceWorker.getRegistration("/").then((registration) => {
+    if (!registration?.active && !registration?.installing && !registration?.waiting) return installOfflineWorker();
+  }).catch(() => {});
+}
 
 function href(comic, chapter) {
   const query = new URLSearchParams();
@@ -48,6 +59,21 @@ function message(title, description) {
   const note = element("div", { cls: "notice" }, element("h2", { text: title }));
   if (navigator.onLine) note.append(link("Browse ComicVerse", "/browse"));
   main.append(note);
+}
+function lock(setting) {
+  generation++;
+  clearTimeout(permissionTimer);
+  canRenderSaved = false;
+  document.body.classList.remove("reader-mode");
+  header.hidden = false;
+  document.title = "Offline reading unavailable | ComicVerse";
+  message("Offline reading is unavailable", setting?.enabled === false && navigator.onLine
+    ? "Downloads and offline reading are disabled. You can still read chapters online."
+    : "Reconnect to ComicVerse to check whether offline reading is available.");
+}
+function scheduleExpiration(setting) {
+  clearTimeout(permissionTimer);
+  permissionTimer = setTimeout(() => lock(null), Math.max(0, setting.expiresAt - Date.now()));
 }
 function group(entries) {
   const comics = new Map();
@@ -98,6 +124,7 @@ function showChapters(entries) {
       try {
         await deleteDownload(chapter);
         const remaining = await listDownloads();
+        if (!canRenderSaved) return;
         const sameComic = ordered(remaining, comic.comicId);
         if (sameComic.length) showChapters(sameComic);
         else {
@@ -158,14 +185,22 @@ function showReader(chapter, entries) {
   main.replaceChildren(settings, toolbar, artwork, nav);
 }
 
-async function render() {
+async function render(refreshOnline = true) {
+  const active = ++generation;
   try {
+    const setting = refreshOnline && navigator.onLine ? await access.checkOnline("/api") : await access.read();
+    if (active !== generation) return;
+    if (!access.isAllowed(setting)) { lock(setting); return; }
+    canRenderSaved = true;
+    scheduleExpiration(setting);
     const query = new URLSearchParams(location.search);
     const comic = query.get("comic");
     const id = query.get("chapter");
     const entries = await listDownloads();
+    if (active !== generation || !canRenderSaved) return;
     if (id) {
       const chapter = await getDownload(id);
+      if (active !== generation || !canRenderSaved) return;
       if (chapter && (!comic || chapter.comicId === comic)) {
         showReader(chapter, ordered(entries, chapter.comicId));
         return;
@@ -175,7 +210,17 @@ async function render() {
     if (chapters.length) showChapters(chapters);
     else showLibrary(entries);
   } catch {
-    message("Downloads could not be opened", "Browser storage is unavailable. Check that site storage is enabled and reopen Downloads.");
+    if (active === generation) lock(null);
   }
 }
+access.onChange((setting) => {
+  const finishedPurge = wasPurging && !setting.purgePending;
+  wasPurging = setting.purgePending;
+  if (!access.isAllowed(setting)) lock(setting);
+  else if (finishedPurge) void render(false);
+  else if (canRenderSaved) scheduleExpiration(setting);
+});
+window.addEventListener("online", () => void render());
+window.addEventListener("focus", () => void render());
+window.addEventListener("pageshow", () => void render());
 void render();

@@ -18,6 +18,7 @@ const NAV = [
   ["Users", "/admin/users"],
   ["Announcements", "/admin/announcements"],
   ["Audit logs", "/admin/audit-logs"],
+  ["Settings", "/admin/settings"],
 ] as const;
 
 /**

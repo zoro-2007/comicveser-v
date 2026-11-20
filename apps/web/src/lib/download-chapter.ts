@@ -1,4 +1,5 @@
-import { api } from "@/lib/api";
+import { api, API } from "@/lib/api";
+import access from "../../public/offline/access.js";
 import type { ChapterMeta, Img, ImgPage } from "@/components/Reader";
 import type { ExtPages } from "@/lib/sources";
 import {
@@ -65,7 +66,7 @@ function verifyImage(path: string, signal: AbortSignal): Promise<{ width: number
 }
 
 async function saveImage(
-  cache: Cache, path: string, src: string, chapterSignal: AbortSignal, opaqueOrigins: Set<string>,
+  cache: Cache, path: string, src: string, chapterSignal: AbortSignal, opaqueOrigins: Set<string>, purgeRevision: number,
 ) {
   const url = new URL(src, window.location.origin);
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
@@ -84,10 +85,11 @@ async function saveImage(
     }
   }
   if (!response) response = await fetch(url, { ...options, mode: "no-cors" });
+  await access.rejectIfDisabledResponse(response);
   if (response.type !== "opaque" && (!response.ok || !/^image\//i.test(response.headers.get("content-type") ?? ""))) {
     throw new Error("The server did not return an image.");
   }
-  await cache.put(path, response);
+  await access.commitDownload(purgeRevision, () => cache.put(path, response));
   // A successful no-CORS fetch can be an opaque 404. Decode the cached image
   // through the worker before counting it, without re-requesting the CDN.
   return verifyImage(path, signal);
@@ -97,6 +99,7 @@ export async function downloadChapter(
   comic: DownloadComic, chapterId: string, signal: AbortSignal, progress: (value: Progress) => void,
 ) {
   if (!navigator.onLine) throw new Error("Reconnect to download this chapter.");
+  const { purgeRevision } = await access.requireEnabled(API);
   await prepareOfflineStorage(signal);
   if (await getDownload(chapterId)) return;
   // Best effort: a browser may decline persistent storage.
@@ -121,9 +124,10 @@ export async function downloadChapter(
     progress({ done: 0, total: pages.length });
     for (let i = 0; i < pages.length; i++) {
       try {
-        dimensions.push(await saveImage(cache, localImagePath(token, i), pages[i].url, signal, opaqueOrigins));
+        dimensions.push(await saveImage(cache, localImagePath(token, i), pages[i].url, signal, opaqueOrigins, purgeRevision));
       } catch (error) {
         signal.throwIfAborted();
+        if ((error as { code?: string })?.code === access.errorCode) throw error;
         if (error instanceof DOMException && error.name === "QuotaExceededError") throw error;
         throw new Error(`Page ${i + 1} of ${pages.length} could not be saved. Check your connection and try again.`);
       }
@@ -133,18 +137,19 @@ export async function downloadChapter(
     if (comic.coverUrl) {
       const cover = localImagePath(token, "cover");
       try {
-        await saveImage(cache, cover, comic.coverUrl, signal, opaqueOrigins);
+        await saveImage(cache, cover, comic.coverUrl, signal, opaqueOrigins, purgeRevision);
         coverIndex = "cover";
       } catch {
         await cache.delete(cover);
       }
     }
+    await access.requireEnabled(API);
     signal.throwIfAborted();
-    await addDownload({
+    await access.commitDownload(purgeRevision, () => addDownload({
       id: chapterId, comicId: comic.id, comicTitle: comic.title,
       number: meta.number, label: meta.displayNumber ?? String(meta.number), title: meta.title,
       savedAt: Date.now(), token, coverIndex, pages: dimensions,
-    });
+    }));
   } catch (error) {
     await caches.delete(name).catch(() => {});
     if (error instanceof DOMException && error.name === "ConstraintError" && await getDownload(chapterId)) return;

@@ -7,6 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model OfflineDownloadSetting {
+  id            String  @id
+  enabled       Boolean @default(true)
+  revision      Int     @default(0)
+  purgeRevision Int     @default(0)
+}
+
 enum ComicType {
   MANGA
   MANHWA

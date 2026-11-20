@@ -247,10 +247,7 @@ export async function saveChapterOffline(input: {
   const db = await openDb();
   const now = Date.now();
 
-  // First remove any stale pages for this chapterId to avoid orphaned pages on re-download.
-  await deleteChapterPagesOnly(input.chapter.chapterId);
-
-  // Check existing cover in a separate readonly transaction so the readwrite tx has zero awaits before .put()
+  // Keep any previously saved chapter intact if a new write fails or exceeds quota.
   const existingCover = await getDownloadedCover(input.comic.comicId).catch(() => null);
   const hasCoverBlob = Boolean(input.coverBlob || existingCover);
 
@@ -261,6 +258,10 @@ export async function saveChapterOffline(input: {
   const coversStore = tx.objectStore(STORE_COVERS);
 
   try {
+    const previousKeys = await reqToPromise(
+      pagesStore.index("by_chapter").getAllKeys(IDBKeyRange.only(input.chapter.chapterId)),
+    );
+    for (const key of previousKeys) pagesStore.delete(key);
 
     if (input.coverBlob && input.coverBlob.size > 0) {
       const coverRec: OfflineCoverRecord = {

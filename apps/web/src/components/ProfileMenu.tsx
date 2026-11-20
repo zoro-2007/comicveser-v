@@ -6,6 +6,7 @@ import { UserRound } from "lucide-react";
 import { useDismiss } from "@/lib/useDismiss";
 import { useLoad } from "@/lib/useApi";
 import { useAuth } from "./AuthProvider";
+import { useDownloadAccess } from "./DownloadAccessProvider";
 
 export function UserAvatar({
   url,
@@ -44,6 +45,7 @@ export function UserAvatar({
  */
 export default function ProfileMenu() {
   const { user, isAdmin, isDelegatedAdmin, logout } = useAuth();
+  const { status: downloadStatus } = useDownloadAccess();
   const profile = useLoad<{ avatarUrl: string | null }>(user ? "/user/profile" : null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -155,7 +157,7 @@ export default function ProfileMenu() {
             <span>Messages</span>
           </Link>
 
-          <Link
+          {downloadStatus === "enabled" && <Link
             role="menuitem"
             href="/downloads"
             tabIndex={tab}
@@ -176,7 +178,7 @@ export default function ProfileMenu() {
               <path d="M5 20h14" />
             </svg>
             <span>Downloads</span>
-          </Link>
+          </Link>}
 
           <Link
             role="menuitem"

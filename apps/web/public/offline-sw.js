@@ -1,8 +1,10 @@
 /* Deliberately cache only the offline shell and explicitly selected images. */
+importScripts("/offline/access.js");
+const downloadAccess = self.ComicVerseDownloadAccess;
 const SHELL_PREFIX = "comicverse-downloads-shell-";
-const SHELL_CACHE = SHELL_PREFIX + "v1";
+const SHELL_CACHE = SHELL_PREFIX + "v3";
 const SHELL = "/offline/downloads.html";
-const ASSETS = [SHELL, "/offline/downloads.css", "/offline/downloads.mjs", "/offline/storage.mjs", "/logo-mark.svg"];
+const ASSETS = [SHELL, "/offline/downloads.css", "/offline/downloads.mjs", "/offline/storage.mjs", "/offline/access.js", "/logo-mark.svg"];
 const MEDIA = /^\/offline-media\/(\d{13}-[a-f0-9-]{36})\/(cover|\d+)$/;
 const CHAPTER_CACHE_PREFIX = "comicverse-chapter-v1-";
 
@@ -32,7 +34,9 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/offline-media/")) {
     const match = url.pathname.match(MEDIA);
     event.respondWith((async () => {
-      if (!match || request.destination !== "image") return new Response(null, { status: 404 });
+      if (!match || request.destination !== "image" || !downloadAccess.isAllowed(await downloadAccess.read())) {
+        return new Response(null, { status: 404 });
+      }
       return await caches.match(url.pathname, { cacheName: CHAPTER_CACHE_PREFIX + match[1] })
         ?? new Response(null, { status: 404 });
     })());

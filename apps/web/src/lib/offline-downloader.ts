@@ -1,10 +1,10 @@
 "use client";
 
 import { API, buildAuthHeaders } from "./api";
+import access from "../../public/offline/access.js";
 import type { Chapter, Comic } from "./comics";
 import type { ChapterMeta, Img, ImgPage } from "@/components/Reader";
 import {
-  deleteDownloadedChapter,
   getDownloadedCover,
   isQuotaExceededError,
   saveChapterOffline,
@@ -42,6 +42,7 @@ const controllers = new Map<string, AbortController>();
 const swAcked = new Set<string>();
 const listeners = new Set<() => void>();
 let bridgeInitialized = false;
+let disableGeneration = 0;
 
 function notify() {
   for (const fn of listeners) {
@@ -61,6 +62,12 @@ function setState(chapterId: string, next: ChapterDownloadState) {
 function initSwBridge() {
   if (bridgeInitialized || typeof window === "undefined") return;
   bridgeInitialized = true;
+  access.onChange((setting) => {
+    if (setting.enabled && !setting.purgePending) return;
+    disableGeneration++;
+    for (const controller of controllers.values()) controller.abort();
+    navigator.serviceWorker?.controller?.postMessage({ type: "CANCEL_ALL_CHAPTER_DOWNLOADS" });
+  });
 
   if (typeof BroadcastChannel !== "undefined") {
     try {
@@ -261,6 +268,7 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
         signal: timeoutCtrl.signal,
       });
 
+      await access.rejectIfDisabledResponse(res);
       if (!res.ok) {
         const statusErr = new Error(`Image request failed (${res.status})`) as Error & { status?: number };
         statusErr.status = res.status;
@@ -274,6 +282,7 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
       const dims = await verifyRenderableImageBlob(blob);
       return { blob, width: dims.width, height: dims.height };
     } catch (err) {
+      if ((err as { code?: string })?.code === access.errorCode) throw err;
       if (parentSignal.aborted) {
         throw new DOMException("Aborted", "AbortError");
       }
@@ -344,6 +353,17 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     return false;
   }
 
+  const generation = disableGeneration;
+  let purgeRevision: number;
+  try {
+    ({ purgeRevision } = await access.requireEnabled(API));
+  } catch {
+    return false;
+  }
+  const pending = states.get(chapter.id)?.phase;
+  if (generation !== disableGeneration || controllers.has(chapter.id)
+    || pending === "checking" || pending === "downloading" || pending === "verifying") return false;
+
   // Prefer Service Worker background execution so downloads survive page navigation & mobile backgrounding
   if (typeof navigator !== "undefined" && "serviceWorker" in navigator && navigator.serviceWorker.controller) {
     swAcked.delete(chapter.id);
@@ -360,6 +380,7 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
       type: "START_CHAPTER_DOWNLOAD",
       payload: {
         apiBase: API,
+        purgeRevision,
         authHeaders: buildAuthHeaders(),
         comic: {
           id: comic.id,
@@ -402,6 +423,17 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     });
     if (ackOk) {
       return true;
+    }
+    if (generation !== disableGeneration) {
+      setState(chapter.id, {
+        chapterId: chapter.id,
+        comicId: comic.id,
+        phase: "canceled",
+        completedPages: 0,
+        totalPages: 0,
+        error: access.errorMessage,
+      });
+      return false;
     }
   }
 
@@ -537,7 +569,9 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
 
     const totalBytes = downloadedPages.reduce((sum, p) => sum + p.sizeBytes, 0);
 
-    await saveChapterOffline({
+    await access.requireEnabled(API);
+    if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    await access.commitDownload(purgeRevision, () => saveChapterOffline({
       comic: {
         comicId: comic.id,
         slug: comic.slug,
@@ -562,7 +596,7 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
       },
       pages: downloadedPages,
       coverBlob,
-    });
+    }));
 
     setState(chapter.id, {
       chapterId: chapter.id,
@@ -575,8 +609,6 @@ export async function startChapterDownload(comic: Comic, chapter: Chapter): Prom
     });
     return true;
   } catch (err) {
-    await deleteDownloadedChapter(chapter.id).catch(() => {});
-
     if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
       setState(chapter.id, {
         chapterId: chapter.id,
@@ -633,9 +665,11 @@ export async function startBulkChapterDownloads(
   maxConcurrentChapters = 5,
 ): Promise<void> {
   if (chapters.length === 0) return;
+  initSwBridge();
+  const generation = disableGeneration;
   let idx = 0;
   async function worker() {
-    while (true) {
+    while (generation === disableGeneration) {
       const i = idx++;
       if (i >= chapters.length) return;
       const ch = chapters[i];

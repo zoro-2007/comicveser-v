@@ -5,9 +5,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, CheckSquare, Download, HardDrive, Trash2, WifiOff } from "lucide-react";
 import { API } from "@/lib/api";
+import access from "../../public/offline/access.js";
 import { Cover } from "./ComicCard";
 import OfflineReader from "./OfflineReader";
 import CircularDownloadProgress from "./CircularDownloadProgress";
+import { useDownloadAccess } from "./DownloadAccessProvider";
 import {
   cancelChapterDownload,
   getAllActiveDownloads,
@@ -57,6 +59,8 @@ function OfflineCover({
 
       if (typeof navigator !== "undefined" && navigator.onLine !== false) {
         try {
+          const setting = await access.read();
+          if (!setting || !access.isAllowed(setting) || !active) return;
           const res = await fetch(`${API}/comics/${encodeURIComponent(comicId)}/cover/file`, {
             cache: "no-store",
           });
@@ -65,7 +69,7 @@ function OfflineCover({
             if (active && blob.size > 0) {
               created = URL.createObjectURL(blob);
               setBlobUrl(created);
-              void saveDownloadedCover(comicId, blob).catch(() => {});
+              void access.commitDownload(setting.purgeRevision, () => saveDownloadedCover(comicId, blob)).catch(() => {});
               return;
             }
           }
@@ -97,6 +101,34 @@ function OfflineCover({
 }
 
 export default function DownloadsView() {
+  const { status, purgeRevision, refresh } = useDownloadAccess();
+  const route = useSearchParams()?.toString() ?? "";
+  const [verifiedRoute, setVerifiedRoute] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void refresh().then(() => { if (active) setVerifiedRoute(route); });
+    return () => { active = false; };
+  }, [refresh, route]);
+
+  if (status === "checking" || verifiedRoute !== route) {
+    return <section className="panel p-6 text-center" role="status">Checking offline access…</section>;
+  }
+  if (status !== "enabled") {
+    return (
+      <section className="panel mx-auto my-6 max-w-xl p-6" aria-labelledby="downloads-locked">
+        <h1 id="downloads-locked" className="text-xl font-bold">Offline reading is unavailable</h1>
+        <p className="mt-2 text-sm text-muted">
+          {status === "disabled" ? "Downloads and offline reading are disabled. You can still read chapters online."
+            : "Reconnect to the internet to check whether offline reading is available."}
+        </p>
+        <Link href="/browse" className="mt-4 inline-block font-medium text-primary">Browse ComicVerse</Link>
+      </section>
+    );
+  }
+  return <SavedDownloadsView key={purgeRevision} />;
+}
+
+function SavedDownloadsView() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const selectedComicId = searchParams?.get("comic") ?? null;

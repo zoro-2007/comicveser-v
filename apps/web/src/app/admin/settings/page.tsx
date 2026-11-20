@@ -1,5 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { useDownloadAccess } from "@/components/DownloadAccessProvider";
+import access, { type DownloadSetting } from "../../../../public/offline/access.js";
 
 const STORE_KEY = "cv-admin-settings";
 const FIELD = "w-full rounded-lg border border-[#322A42] bg-[#211B2D] px-3 py-2.5 text-sm text-white outline-none transition focus:border-[#9333EA]";
@@ -8,6 +11,51 @@ const panelTitle = "text-base font-bold text-white";
 
 type Settings = { siteName: string; tagline: string; supportEmail: string; defaultVisibility: string; allowReviews: boolean; maintenanceMode: boolean };
 const DEFAULTS: Settings = { siteName: "ComicVerse", tagline: "Stories worth staying up for.", supportEmail: "support@comicverse.example", defaultVisibility: "DRAFT", allowReviews: true, maintenanceMode: false };
+
+function OfflineDownloadSetting() {
+  const { status, refresh } = useDownloadAccess();
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
+  const enabled = status === "enabled";
+
+  async function save(next: boolean) {
+    setSaving(true);
+    setNotice(null);
+    try {
+      const result = await api<DownloadSetting>("/admin/settings/offline-downloads", {
+        method: "PUT",
+        json: { enabled: next },
+      });
+      await access.remember(result);
+      setNotice({ text: result.enabled ? "Downloads and offline reading enabled for all users."
+        : "Downloads disabled. Saved chapters will be deleted as devices check in.", error: false });
+    } catch (error) {
+      setNotice({ text: error instanceof Error ? error.message : "Could not save the download setting.", error: true });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className={panel} aria-labelledby="offline-downloads-heading">
+      <h2 id="offline-downloads-heading" className={panelTitle}>Downloads &amp; Offline Reading</h2>
+      <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-[#322A42] bg-[#211B2D] px-3.5 py-3 text-sm">
+        <span>
+          <span className="block font-medium text-white">Allow downloads and offline reading</span>
+          <span className="text-xs text-[#A8A1B5]">Turning this off deletes saved chapters when users return to ComicVerse online. Turning it back on does not restore deleted files.</span>
+        </span>
+        <input type="checkbox" role="switch" checked={enabled}
+          disabled={saving || status === "checking" || status === "locked"}
+          onChange={(event) => void save(event.target.checked)}
+          className="h-5 w-5 shrink-0 accent-[#9333EA]" />
+      </label>
+      {status === "checking" && <p className="mt-2 text-sm text-[#A8A1B5]" role="status">Loading download settings…</p>}
+      {status === "locked" && <button type="button" onClick={() => void refresh()} className="mt-2 text-sm text-primary">Could not verify the setting. Retry</button>}
+      {saving && <p className="mt-2 text-sm text-[#A8A1B5]" role="status">Saving…</p>}
+      {notice && <p className={`mt-2 text-sm ${notice.error ? "text-danger" : "text-[#34D399]"}`} role={notice.error ? "alert" : "status"}>{notice.text}</p>}
+    </section>
+  );
+}
 
 export default function AdminSettings() {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
@@ -86,11 +134,13 @@ export default function AdminSettings() {
         </div>
       </section>
 
+      <OfflineDownloadSetting />
+
       <div className="flex flex-wrap items-center gap-3">
         <button type="button" onClick={save} className="rounded-lg bg-[#9333EA] px-5 py-2.5 text-sm font-semibold text-white transition hover:brightness-110">Save settings</button>
         {saved && <p role="status" className="text-sm text-[#34D399]">Settings saved in this browser.</p>}
       </div>
-      <p className="text-xs text-[#A8A1B5]">There is no server settings endpoint yet, so these settings are stored in this browser only and do not change server behaviour.</p>
+      <p className="text-xs text-[#A8A1B5]">The download switch applies site-wide and saves immediately. The other settings above are stored in this browser only.</p>
     </div>
   );
 }

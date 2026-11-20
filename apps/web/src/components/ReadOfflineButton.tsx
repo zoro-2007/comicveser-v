@@ -1,8 +1,11 @@
 "use client";
 
 import { Download } from "lucide-react";
+import { useDownloadAccess } from "./DownloadAccessProvider";
 
 export default function ReadOfflineButton() {
+  const { status } = useDownloadAccess();
+  if (status !== "enabled") return null;
   const handleClick = () => {
     const el = document.getElementById("chapters-section");
     if (el) {

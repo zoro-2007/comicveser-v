@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Download, History, LayoutDashboard, LogOut, MessageSquare, Settings, ShieldCheck, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
+import { useDownloadAccess } from "./DownloadAccessProvider";
 
 export type PopupUser = {
   username: string;
@@ -25,6 +26,7 @@ export default function ProfilePopup({
   onLoggedOut: () => void;
 }) {
   const router = useRouter();
+  const { status: downloadStatus } = useDownloadAccess();
   const [email, setEmail] = useState<string | null>(null);
 
   // /auth/me only returns username + role; email comes from /user/profile.
@@ -52,7 +54,7 @@ export default function ProfilePopup({
     ...(isAdmin ? [{ href: "/admin", label: "Admin Panel", Icon: LayoutDashboard }] : []),
     { href: "/profile", label: "Profile", Icon: UserRound },
     { href: "/profile/messages", label: "Messages", Icon: MessageSquare },
-    { href: "/downloads", label: "Downloads", Icon: Download },
+    ...(downloadStatus === "enabled" ? [{ href: "/downloads", label: "Downloads", Icon: Download }] : []),
     { href: "/profile/history", label: "History", Icon: History },
     { href: "/profile/settings", label: "Settings", Icon: Settings },
   ];

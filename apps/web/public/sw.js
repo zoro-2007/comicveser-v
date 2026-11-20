@@ -1,4 +1,6 @@
-const CACHE_NAME = "comicverse-offline-shell-v2";
+importScripts("/offline/access.js");
+const downloadAccess = self.ComicVerseDownloadAccess;
+const CACHE_NAME = "comicverse-offline-shell-v4";
 const DB_NAME = "comicverse-offline-v1";
 const DB_VERSION = 1;
 const STORE_COMICS = "comics";
@@ -6,6 +8,7 @@ const STORE_CHAPTERS = "chapters";
 const STORE_PAGES = "pages";
 const STORE_COVERS = "covers";
 const CHANNEL_NAME = "comicverse-offline-downloads";
+const LEGACY_MEDIA = /^\/offline-media\/(\d{13}-[a-f0-9-]{36})\/(cover|\d+)$/;
 
 const PRECACHE_URLS = [
   "/downloads",
@@ -21,6 +24,28 @@ const activeDownloads = new Map(); // chapterId -> { state, controller }
 const MAX_CONCURRENT_SW_DOWNLOADS = 5;
 const downloadQueue = [];
 let runningSwDownloads = 0;
+
+async function stopDownloadJobs() {
+  for (const entry of activeDownloads.values()) entry.controller.abort();
+  const waiting = downloadQueue.splice(0);
+  await Promise.all(waiting.map((job) => {
+    const state = activeDownloads.get(job.payload.chapter.id)?.state;
+    activeDownloads.delete(job.payload.chapter.id);
+    job.resolve();
+    return state && broadcastProgress({ ...state, phase: "canceled", error: downloadAccess.errorMessage });
+  }));
+}
+
+downloadAccess.onChange((setting) => {
+  if (!setting.enabled || setting.purgePending) void stopDownloadJobs().catch(() => {});
+});
+
+function lockedOfflinePage() {
+  return new Response(
+    "<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Offline reading unavailable</title><body style='background:#131118;color:#f5f3fa;font-family:system-ui,sans-serif;padding:24px'><h1>Offline reading is unavailable</h1><p>Reconnect to ComicVerse to check whether offline reading is available.</p></body></html>",
+    { status: 503, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
+  );
+}
 
 function enqueueBackgroundDownload(payload) {
   const chId = payload?.chapter?.id;
@@ -181,19 +206,8 @@ function withDbWriteLock(fn) {
   return next;
 }
 
-async function deleteChapterPagesFromDb(chapterId) {
-  const db = await openOfflineDb();
-  const tx = db.transaction(STORE_PAGES, "readwrite");
-  const idx = tx.objectStore(STORE_PAGES).index("by_chapter");
-  const keys = await reqPromise(idx.getAllKeys(IDBKeyRange.only(chapterId)));
-  const store = tx.objectStore(STORE_PAGES);
-  for (const k of keys) store.delete(k);
-  await txPromise(tx);
-}
-
 async function saveChapterToDb({ comic, chapter, pages, coverBlob }) {
   return withDbWriteLock(async () => {
-    await deleteChapterPagesFromDb(chapter.chapterId);
     const db = await openOfflineDb();
     let existingCover = null;
     try {
@@ -207,6 +221,9 @@ async function saveChapterToDb({ comic, chapter, pages, coverBlob }) {
     const chaptersStore = tx.objectStore(STORE_CHAPTERS);
     const pagesStore = tx.objectStore(STORE_PAGES);
     const coversStore = tx.objectStore(STORE_COVERS);
+    // Replace pages in the same transaction as the chapter record.
+    const previousKeys = await reqPromise(pagesStore.index("by_chapter").getAllKeys(IDBKeyRange.only(chapter.chapterId)));
+    for (const key of previousKeys) pagesStore.delete(key);
 
     const hasCoverBlob = Boolean(coverBlob || existingCover);
     if (coverBlob && coverBlob.size > 0) {
@@ -317,6 +334,7 @@ async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
         cache: "no-store",
         signal: tCtrl.signal,
       });
+      await downloadAccess.rejectIfDisabledResponse(res);
       if (!res.ok) {
         const err = new Error(`Image fetch failed (${res.status})`);
         err.status = res.status;
@@ -327,6 +345,7 @@ async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
       const dims = await verifyBlobInSw(blob);
       return { blob, width: dims.width, height: dims.height };
     } catch (err) {
+      if (err?.code === downloadAccess.errorCode) throw err;
       if (parentSignal.aborted) throw new DOMException("Aborted", "AbortError");
       lastErr = err;
       if (err && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429) throw err;
@@ -380,6 +399,11 @@ async function runBackgroundDownload(payload, existingCtrl) {
   await updateState({ phase: "checking", completedPages: 0, totalPages: 0 });
 
   try {
+    const { purgeRevision } = await downloadAccess.requireEnabled(apiBase);
+    if (Number.isSafeInteger(payload.purgeRevision) && payload.purgeRevision !== purgeRevision) {
+      throw new DOMException("Aborted by a download reset", "AbortError");
+    }
+    if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
     const metaRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}`, authHeaders, ctrl.signal, 45000);
     if (metaRes.status === 404) throw new Error("This chapter is no longer published.");
     if (!metaRes.ok) throw new Error(`Chapter check failed (${metaRes.status})`);
@@ -462,7 +486,9 @@ async function runBackgroundDownload(payload, existingCtrl) {
     await updateState({ phase: "verifying", completedPages: totalPages, totalPages });
     const totalBytes = downloadedPages.reduce((s, p) => s + p.sizeBytes, 0);
 
-    await saveChapterToDb({
+    await downloadAccess.requireEnabled(apiBase);
+    if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    await downloadAccess.commitDownload(purgeRevision, () => saveChapterToDb({
       comic: {
         comicId: comic.id,
         slug: comic.slug,
@@ -487,11 +513,10 @@ async function runBackgroundDownload(payload, existingCtrl) {
       },
       pages: downloadedPages,
       coverBlob,
-    });
+    }));
 
     await updateState({ phase: "saved", completedPages: totalPages, totalPages });
   } catch (err) {
-    await deleteChapterPagesFromDb(chapter.id).catch(() => {});
     const isAbort = ctrl.signal.aborted || (err && err.name === "AbortError");
     const isQuota = err && (err.name === "QuotaExceededError" || err.code === 22);
     const errorMsg = isAbort
@@ -541,6 +566,8 @@ self.addEventListener("message", (event) => {
   } else if (data.type === "CANCEL_CHAPTER_DOWNLOAD" && data.chapterId) {
     const entry = activeDownloads.get(data.chapterId);
     if (entry) entry.controller.abort();
+  } else if (data.type === "CANCEL_ALL_CHAPTER_DOWNLOADS") {
+    event.waitUntil(stopDownloadJobs());
   } else if (data.type === "GET_DOWNLOAD_STATES") {
     const list = Array.from(activeDownloads.values()).map((v) => v.state);
     if (event.source) {
@@ -564,6 +591,18 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (isPrivateOrApiPath(url.pathname)) return;
 
+  if (url.pathname.startsWith("/offline-media/")) {
+    event.respondWith((async () => {
+      const match = url.pathname.match(LEGACY_MEDIA);
+      if (!match || req.destination !== "image" || !downloadAccess.isAllowed(await downloadAccess.read())) {
+        return new Response(null, { status: 404 });
+      }
+      return await caches.match(url.pathname, { cacheName: "comicverse-chapter-v1-" + match[1] })
+        ?? new Response(null, { status: 404 });
+    })());
+    return;
+  }
+
   if (req.mode === "navigate" && url.pathname === "/downloads") {
     event.respondWith(
       (async () => {
@@ -575,6 +614,7 @@ self.addEventListener("fetch", (event) => {
           }
           return networkRes;
         } catch {
+          if (!downloadAccess.isAllowed(await downloadAccess.read())) return lockedOfflinePage();
           const cached = await cache.match("/downloads");
           if (cached) return cached;
           return new Response(
@@ -593,6 +633,7 @@ self.addEventListener("fetch", (event) => {
         try {
           return await fetch(req);
         } catch {
+          if (!downloadAccess.isAllowed(await downloadAccess.read())) return lockedOfflinePage();
           const cache = await caches.open(CACHE_NAME);
           const cachedDownloads = await cache.match("/downloads");
           if (cachedDownloads) return cachedDownloads;

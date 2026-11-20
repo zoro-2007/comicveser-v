@@ -3,13 +3,14 @@ import { ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import type { Response } from "express";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
+import { DownloadPolicyService } from "../downloads/download-policy.module";
 import { ChaptersService } from "./chapters.service";
 import { CreateChapterDto, ImagesQuery, RegisterImagesDto, ReorderDto, UpdateChapterDto, UploadUrlDto } from "./dto/chapter.dto";
 
 @ApiTags("chapters")
 @Controller()
 export class ChaptersController {
-  constructor(private svc: ChaptersService) {}
+  constructor(private svc: ChaptersService, private readonly downloadPolicy: DownloadPolicyService) {}
   @Get("chapters/:id") meta(@Param("id") id: string) { return this.svc.meta(id); }
   @Get("chapters/:id/images") images(@Param("id") id: string, @Query() q: ImagesQuery) { return this.svc.images(id, q.from, q.limit); }
 
@@ -20,6 +21,7 @@ export class ChaptersController {
     @Param("position", ParseIntPipe) position: number,
     @Res() res: Response,
   ) {
+    if (await this.downloadPolicy.rejectIfDisabled(res)) return;
     const { buffer, contentType } = await this.svc.pageFile(id, position);
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "private, no-store");

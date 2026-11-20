@@ -17,6 +17,7 @@ import {
 } from "@/lib/offline-downloader";
 
 import CircularDownloadProgress from "./CircularDownloadProgress";
+import { useDownloadAccess } from "./DownloadAccessProvider";
 
 /** Asura-style Chapter List (.panel, .chap-list, .chaprow) with newest/oldest sorting, read progress, and single/bulk offline downloads. */
 export default function ChapterList({
@@ -32,7 +33,10 @@ export default function ChapterList({
 }) {
   const [newestFirst, setNewestFirst] = useState(true);
   const [savedIds, setSavedIds] = useState<Set<string>>(() => new Set());
-  const [bulkMode, setBulkMode] = useState(false);
+  const { status: downloadStatus, purgeRevision } = useDownloadAccess();
+  const canDownload = downloadStatus === "enabled";
+  const [bulkRequested, setBulkMode] = useState(false);
+  const bulkMode = canDownload && bulkRequested;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [, setTick] = useState(0);
   const lib = useLibrary();
@@ -58,20 +62,26 @@ export default function ChapterList({
   }, [comicId]);
 
   useEffect(() => {
+    if (!canDownload) {
+      setBulkMode(false);
+      setSelectedIds(new Set());
+      return;
+    }
     refreshSaved();
     const unsub = subscribeDownloads(() => {
       setTick((n) => n + 1);
       refreshSaved();
     });
     return unsub;
-  }, [refreshSaved]);
+  }, [canDownload, purgeRevision, refreshSaved]);
 
   // Listen for "Read Offline" button click on the comic detail hero
   useEffect(() => {
+    if (!canDownload) return;
     const onOpenBulk = () => setBulkMode(true);
     window.addEventListener("cv:open-bulk-offline", onOpenBulk);
     return () => window.removeEventListener("cv:open-bulk-offline", onOpenBulk);
-  }, []);
+  }, [canDownload]);
 
   const comicForDownload: Comic = useMemo(
     () =>
@@ -134,6 +144,7 @@ export default function ChapterList({
   };
 
   const handleBulkDownload = () => {
+    if (!canDownload) return;
     const chosen = rows.filter((c) => selectedIds.has(c.id) && !savedIds.has(c.id));
     if (chosen.length === 0) return;
     void startBulkChapterDownloads(comicForDownload, chosen, 5);
@@ -215,7 +226,7 @@ export default function ChapterList({
         </div>
       )}
 
-      {(() => {
+      {canDownload && (() => {
         const failedItem = rows
           .map((ch) => ({ ch, st: getDownloadState(ch.id) }))
           .find((x) => x.st?.phase === "failed" && x.st.error);
@@ -331,7 +342,7 @@ export default function ChapterList({
                 </Link>
                 )}
 
-                {(isSaved || bulkMode || isBusy || isFailed) && (
+                {canDownload && (isSaved || bulkMode || isBusy || isFailed) && (
                 <div className="chap-dl-actions">
                   {isSaved ? (
                     <Link

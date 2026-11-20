@@ -3,6 +3,7 @@ import type { Response } from "express";
 import { ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
+import { DownloadPolicyService } from "../downloads/download-policy.module";
 import { ComicsService } from "./comics.service";
 import { CreateComicDto, ListComicsQuery, UpdateComicDto, UpdateComicRatingDto } from "./dto/comic.dto";
 import { IsInt, IsString, Max, Min } from "class-validator";
@@ -11,7 +12,7 @@ class ComicCoverUploadDto { @IsString() contentType: string; @IsInt() @Min(1) @M
 @ApiTags("comics")
 @Controller()
 export class ComicsController {
-  constructor(private svc: ComicsService) {}
+  constructor(private svc: ComicsService, private readonly downloadPolicy: DownloadPolicyService) {}
 
   // Static routes are declared before :slug so they are not captured by it.
   @Get("comics") list(@Query() q: ListComicsQuery) { return this.svc.list(q); }
@@ -21,6 +22,7 @@ export class ComicsController {
   @Throttle({ default: { ttl: 60_000, limit: 600 } })
   @Get("comics/:id/cover/file")
   async coverFile(@Param("id") id: string, @Res() res: Response) {
+    if (await this.downloadPolicy.rejectIfDisabled(res)) return;
     const { buffer, contentType } = await this.svc.coverFile(id);
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "private, no-store");
