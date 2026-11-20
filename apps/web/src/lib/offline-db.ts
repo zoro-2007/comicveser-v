@@ -250,6 +250,10 @@ export async function saveChapterOffline(input: {
   // First remove any stale pages for this chapterId to avoid orphaned pages on re-download.
   await deleteChapterPagesOnly(input.chapter.chapterId);
 
+  // Check existing cover in a separate readonly transaction so the readwrite tx has zero awaits before .put()
+  const existingCover = await getDownloadedCover(input.comic.comicId).catch(() => null);
+  const hasCoverBlob = Boolean(input.coverBlob || existingCover);
+
   const tx = db.transaction([STORE_COMICS, STORE_CHAPTERS, STORE_PAGES, STORE_COVERS], "readwrite");
   const comicsStore = tx.objectStore(STORE_COMICS);
   const chaptersStore = tx.objectStore(STORE_CHAPTERS);
@@ -257,8 +261,6 @@ export async function saveChapterOffline(input: {
   const coversStore = tx.objectStore(STORE_COVERS);
 
   try {
-    const existingCover = (await reqToPromise(coversStore.get(input.comic.comicId))) as OfflineCoverRecord | undefined;
-    const hasCoverBlob = Boolean(input.coverBlob || existingCover);
 
     if (input.coverBlob && input.coverBlob.size > 0) {
       const coverRec: OfflineCoverRecord = {
@@ -348,6 +350,13 @@ export async function deleteDownloadedChapter(chapterId: string): Promise<void> 
   }
 
   await txDone(tx);
+}
+
+
+export async function deleteDownloadedChapters(chapterIds: string[]): Promise<void> {
+  for (const id of chapterIds) {
+    await deleteDownloadedChapter(id);
+  }
 }
 
 export async function deleteDownloadedComic(comicId: string): Promise<void> {

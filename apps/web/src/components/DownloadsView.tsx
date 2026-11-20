@@ -1,22 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Download, HardDrive, Trash2, WifiOff } from "lucide-react";
+import { ArrowLeft, CheckSquare, Download, HardDrive, Trash2, WifiOff } from "lucide-react";
 import { API } from "@/lib/api";
 import { Cover } from "./ComicCard";
 import OfflineReader from "./OfflineReader";
 import CircularDownloadProgress from "./CircularDownloadProgress";
-import { cancelChapterDownload, getAllActiveDownloads, subscribeDownloads, type ChapterDownloadState } from "@/lib/offline-downloader";
 import {
-  deleteDownloadedChapter,
+  cancelChapterDownload,
+  getAllActiveDownloads,
+  subscribeDownloads,
+  type ChapterDownloadState,
+} from "@/lib/offline-downloader";
+import {
+  deleteDownloadedChapters,
   deleteDownloadedComic,
   formatBytes,
   getAllDownloadedComics,
   getDownloadedCover,
-  saveDownloadedCover,
   getOfflineStorageStats,
+  saveDownloadedCover,
   type DownloadedComicSummary,
   type OfflineStorageStats,
 } from "@/lib/offline-db";
@@ -50,7 +55,6 @@ function OfflineCover({
         // Ignore IndexedDB cover read error
       }
 
-      // If no cover blob was saved yet and browser is online, fetch & cache it via scoped API endpoint
       if (typeof navigator !== "undefined" && navigator.onLine !== false) {
         try {
           const res = await fetch(`${API}/comics/${encodeURIComponent(comicId)}/cover/file`, {
@@ -105,6 +109,13 @@ export default function DownloadsView() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [activeDownloads, setActiveDownloads] = useState<ChapterDownloadState[]>([]);
 
+  // Mobile-friendly select mode & long-press state for downloaded chapters
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedChapters, setSelectedChapters] = useState<Set<string>>(() => new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressedRef = useRef(false);
+
   const loadData = useCallback(async () => {
     try {
       const [list, st] = await Promise.all([getAllDownloadedComics(), getOfflineStorageStats()]);
@@ -135,6 +146,12 @@ export default function DownloadsView() {
     };
   }, [loadData]);
 
+  // Reset select mode when switching comics
+  useEffect(() => {
+    setSelectMode(false);
+    setSelectedChapters(new Set());
+  }, [selectedComicId]);
+
   const activeSummary = useMemo(
     () => (selectedComicId ? summaries.find((s) => s.comic.comicId === selectedComicId) ?? null : null),
     [summaries, selectedComicId],
@@ -144,16 +161,6 @@ export default function DownloadsView() {
     if (!activeSummary || !selectedChapterId) return null;
     return activeSummary.chapters.find((c) => c.chapterId === selectedChapterId) ?? null;
   }, [activeSummary, selectedChapterId]);
-
-  const handleRemoveChapter = async (chapterId: string) => {
-    setBusyId(chapterId);
-    try {
-      await deleteDownloadedChapter(chapterId);
-      await loadData();
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const handleRemoveComic = async (comicId: string) => {
     setBusyId(comicId);
@@ -168,7 +175,53 @@ export default function DownloadsView() {
     }
   };
 
-  // Standalone offline reader mode (when ?comic=...&chapter=... is selected)
+  const toggleSelectChapter = (chapterId: string) => {
+    setSelectedChapters((prev) => {
+      const next = new Set(prev);
+      if (next.has(chapterId)) next.delete(chapterId);
+      else next.add(chapterId);
+      return next;
+    });
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedChapters.size === 0) return;
+    setDeletingSelected(true);
+    try {
+      const ids = Array.from(selectedChapters);
+      await deleteDownloadedChapters(ids);
+      setSelectedChapters(new Set());
+      setSelectMode(false);
+      await loadData();
+      if (activeSummary && ids.length >= activeSummary.chapters.length) {
+        router.push("/downloads");
+      }
+    } finally {
+      setDeletingSelected(false);
+    }
+  };
+
+  const clearLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const startLongPress = (chapterId: string) => {
+    clearLongPress();
+    longPressedRef.current = false;
+    longPressTimer.current = setTimeout(() => {
+      longPressedRef.current = true;
+      setSelectMode(true);
+      setSelectedChapters((prev) => {
+        const next = new Set(prev);
+        next.add(chapterId);
+        return next;
+      });
+    }, 450);
+  };
+
   if (activeSummary && activeChapter) {
     return (
       <OfflineReader
@@ -260,11 +313,11 @@ export default function DownloadsView() {
       ) : activeSummary ? (
         <section className="panel" data-layer="Downloaded Chapters">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
-            <div className="flex items-center gap-3 min-w-0">
+            <div className="flex min-w-0 items-center gap-3">
               <button
                 type="button"
                 onClick={() => router.push("/downloads")}
-                className="pillbtn ghost"
+                className="pillbtn ghost shrink-0"
                 style={{ marginLeft: 0 }}
               >
                 <ArrowLeft size={14} aria-hidden />
@@ -280,50 +333,147 @@ export default function DownloadsView() {
               </div>
             </div>
 
-            <button
-              type="button"
-              disabled={busyId === activeSummary.comic.comicId}
-              onClick={() => void handleRemoveComic(activeSummary.comic.comicId)}
-              className="pillbtn ghost dl-danger-btn"
-              style={{ marginLeft: 0 }}
-            >
-              <Trash2 size={14} aria-hidden />
-              {busyId === activeSummary.comic.comicId ? "Removing…" : "Remove All"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectMode((v) => {
+                    if (v) setSelectedChapters(new Set());
+                    return !v;
+                  });
+                }}
+                className={`pillbtn ${selectMode ? "gold-offline" : "ghost"}`}
+                style={{ marginLeft: 0 }}
+              >
+                <CheckSquare size={14} aria-hidden />
+                {selectMode ? "Done" : "Select"}
+              </button>
+              <button
+                type="button"
+                disabled={busyId === activeSummary.comic.comicId}
+                onClick={() => void handleRemoveComic(activeSummary.comic.comicId)}
+                className="pillbtn ghost dl-danger-btn"
+                style={{ marginLeft: 0 }}
+              >
+                <Trash2 size={14} aria-hidden />
+                {busyId === activeSummary.comic.comicId ? "Removing…" : "Remove All"}
+              </button>
+            </div>
           </div>
 
-          <div className="chap-list">
-            {activeSummary.chapters.map((ch) => (
-              <div key={ch.chapterId} className="chaprow chaprow-wrap">
-                <Link
-                  href={`/downloads?comic=${encodeURIComponent(activeSummary.comic.comicId)}&chapter=${encodeURIComponent(ch.chapterId)}`}
-                  className="chaprow-link"
+          {selectMode && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#fbbf24]/30 bg-[#232130] px-3.5 py-2.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[#d4d0e2]">
+                <button
+                  type="button"
+                  onClick={() => setSelectedChapters(new Set(activeSummary.chapters.map((c) => c.chapterId)))}
+                  className="chap-dl-btn"
                 >
-                  <span className="min-w-0 truncate">
-                    <span className="n">Chapter {ch.displayNumber ?? ch.number}</span>
-                    {!/^chapter\s/i.test(ch.title) && ch.title && (
-                      <span className="t">— {ch.title}</span>
-                    )}
-                  </span>
-                  <span className="w">
-                    {ch.pageCount} pages · {formatBytes(ch.totalBytes)}
-                  </span>
-                </Link>
-                <div className="chap-dl-actions">
+                  Select All ({activeSummary.chapters.length})
+                </button>
+                {selectedChapters.size > 0 && (
                   <button
                     type="button"
-                    disabled={busyId === ch.chapterId}
-                    onClick={() => void handleRemoveChapter(ch.chapterId)}
-                    className="chap-dl-btn remove"
-                    aria-label={`Remove Chapter ${ch.displayNumber ?? ch.number} from downloads`}
-                    title="Remove download"
+                    onClick={() => setSelectedChapters(new Set())}
+                    className="chap-dl-btn"
                   >
-                    <Trash2 size={13} aria-hidden />
-                    <span>{busyId === ch.chapterId ? "…" : "Remove"}</span>
+                    Clear
                   </button>
-                </div>
+                )}
+                <span>
+                  <b className="text-white">{selectedChapters.size}</b> selected
+                </span>
               </div>
-            ))}
+
+              <button
+                type="button"
+                disabled={selectedChapters.size === 0 || deletingSelected}
+                onClick={() => void handleDeleteSelected()}
+                className="chap-dl-btn remove disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 size={13} aria-hidden />
+                <span>{deletingSelected ? "Deleting…" : `Delete Selected (${selectedChapters.size})`}</span>
+              </button>
+            </div>
+          )}
+
+          <div className="chap-list">
+            {activeSummary.chapters.map((ch) => {
+              const checked = selectedChapters.has(ch.chapterId);
+              const chLabel = String(ch.displayNumber ?? ch.number);
+
+              if (selectMode) {
+                return (
+                  <button
+                    key={ch.chapterId}
+                    type="button"
+                    onClick={() => toggleSelectChapter(ch.chapterId)}
+                    className={`chaprow chaprow-wrap w-full text-left ${checked ? "border-[#fbbf24]/60 bg-[#fbbf24]/10" : ""}`}
+                  >
+                    <span className="flex items-center pl-3 pr-1">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        readOnly
+                        aria-label={`Select Chapter ${chLabel}`}
+                        className="h-4 w-4 accent-[#fbbf24]"
+                      />
+                    </span>
+                    <span className="chaprow-link">
+                      <span className="min-w-0 truncate">
+                        <span className="n">Chapter {chLabel}</span>
+                        {!/^chapter\s/i.test(ch.title) && ch.title && (
+                          <span className="t">— {ch.title}</span>
+                        )}
+                      </span>
+                      <span className="w">
+                        {ch.pageCount} pages · {formatBytes(ch.totalBytes)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              }
+
+              return (
+                <div
+                  key={ch.chapterId}
+                  className="chaprow chaprow-wrap select-none"
+                  onTouchStart={() => startLongPress(ch.chapterId)}
+                  onTouchEnd={clearLongPress}
+                  onTouchMove={clearLongPress}
+                  onTouchCancel={clearLongPress}
+                  onMouseDown={() => startLongPress(ch.chapterId)}
+                  onMouseUp={clearLongPress}
+                  onMouseLeave={clearLongPress}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setSelectMode(true);
+                    setSelectedChapters((prev) => new Set(prev).add(ch.chapterId));
+                  }}
+                >
+                  <Link
+                    href={`/downloads?comic=${encodeURIComponent(activeSummary.comic.comicId)}&chapter=${encodeURIComponent(ch.chapterId)}`}
+                    onClick={(e) => {
+                      if (longPressedRef.current) {
+                        e.preventDefault();
+                        longPressedRef.current = false;
+                      }
+                    }}
+                    className="chaprow-link"
+                  >
+                    <span className="min-w-0 truncate">
+                      <span className="n">Chapter {chLabel}</span>
+                      {!/^chapter\s/i.test(ch.title) && ch.title && (
+                        <span className="t">— {ch.title}</span>
+                      )}
+                    </span>
+                    <span className="w">
+                      {ch.pageCount} pages · {formatBytes(ch.totalBytes)}
+                    </span>
+                  </Link>
+                </div>
+              );
+            })}
           </div>
         </section>
       ) : summaries.length === 0 ? (

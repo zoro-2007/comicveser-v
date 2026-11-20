@@ -30,9 +30,9 @@ export interface ChapterDownloadState {
   error?: string;
 }
 
-const IMAGE_BATCH_LIMIT = 30;
+const IMAGE_BATCH_LIMIT = 100;
 const MAX_BATCH_ITERATIONS = 70;
-const MAX_PAGE_RETRIES = 2;
+const MAX_PAGE_RETRIES = 3;
 const PAGE_TIMEOUT_MS = 45_000;
 const CONCURRENCY = 2;
 const CHANNEL_NAME = "comicverse-offline-downloads";
@@ -84,6 +84,12 @@ function initSwBridge() {
         swAcked.add(data.state.chapterId);
           setState(data.state.chapterId, data.state as ChapterDownloadState);
       } else if (data?.type === "DOWNLOAD_STATES_SNAPSHOT" && Array.isArray(data.states)) {
+        const activeIds = new Set((data.states as ChapterDownloadState[]).map((s) => s.chapterId));
+        for (const [id, st] of states.entries()) {
+          if (!controllers.has(id) && !activeIds.has(id) && (st.phase === "checking" || st.phase === "downloading" || st.phase === "verifying")) {
+            states.delete(id);
+          }
+        }
         for (const st of data.states as ChapterDownloadState[]) {
           if (st?.chapterId) states.set(st.chapterId, st);
         }
@@ -277,7 +283,7 @@ async function fetchAndVerifyImage(url: string, parentSignal: AbortSignal): Prom
         throw err;
       }
       if (attempt < MAX_PAGE_RETRIES) {
-        await sleep(400 * (attempt + 1), parentSignal);
+        await sleep((status === 429 ? 1500 : 500) * (attempt + 1), parentSignal);
       }
     } finally {
       clearTimeout(timer);

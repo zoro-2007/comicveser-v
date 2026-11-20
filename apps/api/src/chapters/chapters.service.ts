@@ -1,5 +1,5 @@
 import { resolveChapterDisplayNumber } from "../sources/chapter-display";
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadGatewayException, BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { NotificationsService } from "../notifications/notifications.service";
@@ -70,6 +70,15 @@ export class ChaptersService {
     const chapter = await this.db.chapter.findFirst({ where: { id, ...this.liveWhere }, include: { sourceChapter: true } });
     if (!chapter) throw new NotFoundException("Chapter not found.");
     if (chapter.sourceChapter) {
+      const now = Date.now();
+      const cachedItems = this.pageItemCache.get(id);
+      if (cachedItems && cachedItems.expiresAt > now) {
+        return {
+          total: cachedItems.total,
+          from,
+          items: cachedItems.items.slice(from, from + limit),
+        };
+      }
       const sourcePages = await this.sources.publishedChapterPages(id, 0, 2000);
       if (!sourcePages) throw new NotFoundException("Chapter not found.");
       if (sourcePages.items.length > 0) {
@@ -77,9 +86,18 @@ export class ChaptersService {
           const firstKey = this.pageUrlCache.keys().next().value;
           if (firstKey) this.pageUrlCache.delete(firstKey);
         }
+        if (this.pageItemCache.size > 200) {
+          const firstKey = this.pageItemCache.keys().next().value;
+          if (firstKey) this.pageItemCache.delete(firstKey);
+        }
         this.pageUrlCache.set(id, {
-          expiresAt: Date.now() + 5 * 60_000,
+          expiresAt: now + 5 * 60_000,
           urls: sourcePages.items.map((it) => it.url),
+        });
+        this.pageItemCache.set(id, {
+          expiresAt: now + 5 * 60_000,
+          total: sourcePages.total,
+          items: sourcePages.items,
         });
       }
       return {
@@ -98,6 +116,7 @@ export class ChaptersService {
 
 
   private pageUrlCache = new Map<string, { expiresAt: number; urls: string[] }>();
+  private pageItemCache = new Map<string, { expiresAt: number; total: number; items: Array<{ id: string; position: number; width: number; height: number; url: string }> }>();
 
   async pageFile(id: string, position: number): Promise<{ buffer: Buffer; contentType: string }> {
     if (!Number.isInteger(position) || position < 0 || position > 2000) {
@@ -144,20 +163,45 @@ export class ChaptersService {
       ? targetUrl
       : `http://127.0.0.1:${process.env.PORT || 4000}${targetUrl.startsWith("/") ? targetUrl : `/${targetUrl}`}`;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15_000);
+    let referer = "https://weebcentral.com/";
     try {
-      const upstream = await fetch(resolvedUrl, {
-        method: "GET",
-        redirect: "follow",
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "ComicVerseOfflineFetcher/1.0",
-          Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
-        },
-      });
-      if (!upstream.ok) {
-        throw new NotFoundException(`Could not fetch page image (${upstream.status}).`);
+      const u = new URL(resolvedUrl);
+      if (!/lastation|lowee|leanbox|planeptune|weebcentral/i.test(u.hostname)) {
+        referer = `${u.origin}/`;
+      }
+    } catch {}
+
+    let upstream: globalThis.Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20_000);
+      try {
+        upstream = await fetch(resolvedUrl, {
+          method: "GET",
+          redirect: "follow",
+          signal: controller.signal,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+            Referer: referer,
+          },
+        });
+        if (upstream.ok || (upstream.status >= 400 && upstream.status < 500 && upstream.status !== 429)) {
+          break;
+        }
+      } catch (err) {
+        if (attempt === 2) throw new BadGatewayException("Upstream image CDN timed out or failed.");
+      } finally {
+        clearTimeout(timer);
+      }
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+    try {
+      if (!upstream || !upstream.ok) {
+        const st = upstream?.status;
+        if (st === 404 || st === 410) throw new NotFoundException(`Page image not found (${st}).`);
+        throw new BadGatewayException(`Upstream image CDN error (${st ?? "network"}).`);
       }
       const rawType = (upstream.headers.get("content-type") || "application/octet-stream").split(";")[0].trim().toLowerCase();
       if (!rawType.startsWith("image/") && rawType !== "application/octet-stream") {
@@ -171,8 +215,8 @@ export class ChaptersService {
         buffer: Buffer.from(arr),
         contentType: rawType.startsWith("image/") ? rawType : "image/jpeg",
       };
-    } finally {
-      clearTimeout(timer);
+    } catch (err) {
+      throw err;
     }
   }
 

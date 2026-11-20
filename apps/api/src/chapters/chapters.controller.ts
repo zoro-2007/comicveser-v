@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Put, Query, Res } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import type { Response } from "express";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
 import { ChaptersService } from "./chapters.service";
@@ -12,6 +13,7 @@ export class ChaptersController {
   @Get("chapters/:id") meta(@Param("id") id: string) { return this.svc.meta(id); }
   @Get("chapters/:id/images") images(@Param("id") id: string, @Query() q: ImagesQuery) { return this.svc.images(id, q.from, q.limit); }
 
+  @Throttle({ default: { ttl: 60_000, limit: 2000 } })
   @Get("chapters/:id/pages/:position/file")
   async pageFile(
     @Param("id") id: string,

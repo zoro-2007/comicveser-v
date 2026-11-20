@@ -269,7 +269,40 @@ export default function ChapterList({
                   </label>
                 )}
 
-                <Link href={`/comics/${slug}/chapter/${ch.id}`} className="chaprow-link">
+                {bulkMode && !isSaved ? (
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(ch.id)}
+                    className="chaprow-link w-full border-0 bg-transparent text-left"
+                  >
+                  <span className="min-w-0 truncate">
+                    <span className="n">Chapter {chNumLabel}</span>
+                    {generic && <span className="t">— {generic}</span>}
+                    {ch.id === latestId && (
+                      <span className="tag purple" style={{ marginLeft: 8, padding: "1px 7px", fontSize: 10 }}>
+                        NEW
+                      </span>
+                    )}
+                    {current && (
+                      <span className="tag purple" style={{ marginLeft: 8, padding: "1px 7px", fontSize: 10 }}>
+                        Continue · p.{progress!.imageIndex + 1}
+                      </span>
+                    )}
+                    {read && (
+                      <span className="tag grey" style={{ marginLeft: 8, padding: "1px 7px", fontSize: 10 }}>
+                        Read
+                      </span>
+                    )}
+                  </span>
+                  <span suppressHydrationWarning className="w">
+                    {timeAgo(ch.publishedAt) ||
+                      (ch.publishedAt && new Date(ch.publishedAt).getTime() > 0
+                        ? new Date(ch.publishedAt).toLocaleDateString("en-IN", { dateStyle: "medium" })
+                        : "")}
+                  </span>
+                </button>
+                ) : (
+                  <Link href={`/comics/${slug}/chapter/${ch.id}`} className="chaprow-link">
                   <span className="min-w-0 truncate">
                     <span className="n">Chapter {chNumLabel}</span>
                     {generic && <span className="t">— {generic}</span>}
@@ -296,6 +329,7 @@ export default function ChapterList({
                         : "")}
                   </span>
                 </Link>
+                )}
 
                 {(isSaved || bulkMode || isBusy || isFailed) && (
                 <div className="chap-dl-actions">

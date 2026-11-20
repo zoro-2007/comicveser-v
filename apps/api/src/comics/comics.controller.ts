@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query, Res } from "@nestjs/common";
 import type { Response } from "express";
 import { ApiTags } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { AuthUser, CurrentUser, RequirePermission } from "../auth/auth.guard";
 import { ComicsService } from "./comics.service";
 import { CreateComicDto, ListComicsQuery, UpdateComicDto, UpdateComicRatingDto } from "./dto/comic.dto";
@@ -17,6 +18,7 @@ export class ComicsController {
   @Get("comics/trending") trending() { return this.svc.trending(); }
   @Get("comics/latest") latest() { return this.svc.latest(); }
   @Get("comics/popular") popular(@Query("period") period?: string) { return this.svc.popular(period === "weekly" || period === "monthly" ? period : "all"); }
+  @Throttle({ default: { ttl: 60_000, limit: 600 } })
   @Get("comics/:id/cover/file")
   async coverFile(@Param("id") id: string, @Res() res: Response) {
     const { buffer, contentType } = await this.svc.coverFile(id);

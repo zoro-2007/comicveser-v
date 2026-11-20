@@ -32,9 +32,10 @@ export class WeebCentralProvider implements MangaSourceProvider {
     };
   }
 
-  private async response(url: string, accept: string, init: RequestInit = {}): Promise<Response> {
+  private async response(url: string, accept: string, init: RequestInit = {}, maxDelayMs?: number): Promise<Response> {
     const operation = async () => {
-      const delay = Math.max(0, this.lastRequestAt + this.minimumIntervalMs - Date.now());
+      const effectiveInterval = maxDelayMs !== undefined ? Math.min(this.minimumIntervalMs, maxDelayMs) : this.minimumIntervalMs;
+      const delay = Math.max(0, this.lastRequestAt + effectiveInterval - Date.now());
       if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
       this.lastRequestAt = Date.now();
       const controller = new AbortController();
@@ -76,8 +77,8 @@ export class WeebCentralProvider implements MangaSourceProvider {
     return result;
   }
 
-  private async html(url: string, init?: RequestInit): Promise<string> {
-    try { return await (await this.response(url, "text/html", init)).text(); }
+  private async html(url: string, init?: RequestInit, maxDelayMs?: number): Promise<string> {
+    try { return await (await this.response(url, "text/html", init, maxDelayMs)).text(); }
     catch (error) {
       if (error instanceof SourceError) throw error;
       throw new SourceError("BAD_RESPONSE", "WeebCentral sent a response we could not read.");
@@ -147,6 +148,6 @@ export class WeebCentralProvider implements MangaSourceProvider {
     if (!ULID.test(chapterId)) throw new SourceError("INVALID_REQUEST", "That chapter id is not valid.");
     if (mangaId && !ULID.test(mangaId)) throw new SourceError("INVALID_REQUEST", "That title id is not valid.");
     const url = new URL(`/chapters/${encodeURIComponent(chapterId)}/images?is_prev=False`, SITE);
-    return normalizePages(await this.html(url.toString()), chapterId.toUpperCase(), mangaId);
+    return normalizePages(await this.html(url.toString(), undefined, 1500), chapterId.toUpperCase(), mangaId);
   }
 }

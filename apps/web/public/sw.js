@@ -18,6 +18,54 @@ const PRECACHE_URLS = [
 
 const PRIVATE_PREFIXES = ["/api/", "/auth/", "/user/", "/admin/", "/creator/"];
 const activeDownloads = new Map(); // chapterId -> { state, controller }
+const MAX_CONCURRENT_SW_DOWNLOADS = 5;
+const downloadQueue = [];
+let runningSwDownloads = 0;
+
+function enqueueBackgroundDownload(payload) {
+  const chId = payload?.chapter?.id;
+  if (!chId) return Promise.resolve();
+  if (activeDownloads.has(chId) || downloadQueue.some((p) => p.chapter.id === chId)) {
+    return Promise.resolve();
+  }
+  const initialState = {
+    chapterId: chId,
+    comicId: payload.comic.id,
+    comicTitle: payload.comic.title,
+    chapterNumber: payload.chapter.displayNumber ?? payload.chapter.number,
+    phase: "checking",
+    completedPages: 0,
+    totalPages: 0,
+  };
+  const ctrl = new AbortController();
+  activeDownloads.set(chId, { state: initialState, controller: ctrl });
+  void broadcastProgress(initialState);
+
+  return new Promise((resolve) => {
+    downloadQueue.push({ payload, ctrl, resolve });
+    pumpDownloadQueue();
+  });
+}
+
+function pumpDownloadQueue() {
+  while (runningSwDownloads < MAX_CONCURRENT_SW_DOWNLOADS && downloadQueue.length > 0) {
+    const job = downloadQueue.shift();
+    if (!job) break;
+    if (job.ctrl.signal.aborted) {
+      activeDownloads.delete(job.payload.chapter.id);
+      job.resolve();
+      continue;
+    }
+    runningSwDownloads++;
+    runBackgroundDownload(job.payload, job.ctrl)
+      .catch(() => {})
+      .finally(() => {
+        runningSwDownloads = Math.max(0, runningSwDownloads - 1);
+        job.resolve();
+        pumpDownloadQueue();
+      });
+  }
+}
 const bc = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(CHANNEL_NAME) : null;
 
 function isPrivateOrApiPath(pathname) {
@@ -96,12 +144,41 @@ function reqPromise(req) {
   });
 }
 
-function txPromise(tx) {
+function txPromise(tx, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error("IDB tx failed"));
-    tx.onabort = () => reject(tx.error || new Error("IDB tx aborted"));
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { tx.abort(); } catch {}
+      reject(new Error("Offline storage write timed out"));
+    }, timeoutMs);
+    tx.oncomplete = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    tx.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(tx.error || new Error("IDB tx failed"));
+    };
+    tx.onabort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(tx.error || new Error("IDB tx aborted"));
+    };
   });
+}
+
+let dbWriteChain = Promise.resolve();
+function withDbWriteLock(fn) {
+  const next = dbWriteChain.then(fn, fn);
+  dbWriteChain = next.catch(() => {});
+  return next;
 }
 
 async function deleteChapterPagesFromDb(chapterId) {
@@ -115,18 +192,24 @@ async function deleteChapterPagesFromDb(chapterId) {
 }
 
 async function saveChapterToDb({ comic, chapter, pages, coverBlob }) {
-  await deleteChapterPagesFromDb(chapter.chapterId);
-  const db = await openOfflineDb();
-  const now = Date.now();
-  const tx = db.transaction([STORE_COMICS, STORE_CHAPTERS, STORE_PAGES, STORE_COVERS], "readwrite");
-  const comicsStore = tx.objectStore(STORE_COMICS);
-  const chaptersStore = tx.objectStore(STORE_CHAPTERS);
-  const pagesStore = tx.objectStore(STORE_PAGES);
-  const coversStore = tx.objectStore(STORE_COVERS);
+  return withDbWriteLock(async () => {
+    await deleteChapterPagesFromDb(chapter.chapterId);
+    const db = await openOfflineDb();
+    let existingCover = null;
+    try {
+      const rTx = db.transaction(STORE_COVERS, "readonly");
+      existingCover = await reqPromise(rTx.objectStore(STORE_COVERS).get(comic.comicId));
+    } catch {}
 
-  const existingCover = await reqPromise(coversStore.get(comic.comicId));
-  const hasCoverBlob = Boolean(coverBlob || existingCover);
-  if (coverBlob && coverBlob.size > 0) {
+    const now = Date.now();
+    const tx = db.transaction([STORE_COMICS, STORE_CHAPTERS, STORE_PAGES, STORE_COVERS], "readwrite");
+    const comicsStore = tx.objectStore(STORE_COMICS);
+    const chaptersStore = tx.objectStore(STORE_CHAPTERS);
+    const pagesStore = tx.objectStore(STORE_PAGES);
+    const coversStore = tx.objectStore(STORE_COVERS);
+
+    const hasCoverBlob = Boolean(coverBlob || existingCover);
+    if (coverBlob && coverBlob.size > 0) {
     coversStore.put({
       comicId: comic.comicId,
       mimeType: coverBlob.type || "image/jpeg",
@@ -151,8 +234,9 @@ async function saveChapterToDb({ comic, chapter, pages, coverBlob }) {
     });
   }
 
-  chaptersStore.put({ ...chapter, downloadedAt: now });
-  await txPromise(tx);
+    chaptersStore.put({ ...chapter, downloadedAt: now });
+    await txPromise(tx);
+  });
 }
 
 async function broadcastProgress(state) {
@@ -218,7 +302,7 @@ function isSameOriginOrApi(url, apiBase) {
 
 async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
   let lastErr;
-  for (let attempt = 0; attempt <= 2; attempt++) {
+  for (let attempt = 0; attempt <= 3; attempt++) {
     if (parentSignal.aborted) throw new DOMException("Aborted", "AbortError");
     const tCtrl = new AbortController();
     const timer = setTimeout(() => tCtrl.abort(), 25_000);
@@ -246,7 +330,7 @@ async function fetchImageWithRetry(url, internal, authHeaders, parentSignal) {
       if (parentSignal.aborted) throw new DOMException("Aborted", "AbortError");
       lastErr = err;
       if (err && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429) throw err;
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      if (attempt < 3) await new Promise((r) => setTimeout(r, (err?.status === 429 ? 1500 : 500) * (attempt + 1)));
     } finally {
       clearTimeout(timer);
       parentSignal.removeEventListener("abort", onAbort);
@@ -275,11 +359,9 @@ async function fetchJsonTimeout(url, headers, parentSignal, timeoutMs = 45000) {
   }
 }
 
-async function runBackgroundDownload(payload) {
+async function runBackgroundDownload(payload, existingCtrl) {
   const { apiBase, authHeaders, comic, chapter } = payload;
-  if (activeDownloads.has(chapter.id)) return;
-
-  const ctrl = new AbortController();
+  const ctrl = existingCtrl || new AbortController();
   const updateState = async (patch) => {
     const prev = activeDownloads.get(chapter.id)?.state || {
       chapterId: chapter.id,
@@ -310,7 +392,7 @@ async function runBackgroundDownload(payload) {
     let from = 0;
     let total = Infinity;
     for (let b = 0; b < 70; b++) {
-      const imgRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=30`, authHeaders, ctrl.signal, 45000);
+      const imgRes = await fetchJsonTimeout(`${apiBase}/chapters/${encodeURIComponent(chapter.id)}/images?from=${from}&limit=100`, authHeaders, ctrl.signal, 45000);
       if (!imgRes.ok) throw new Error(`Could not load chapter pages (${imgRes.status})`);
       const batch = await imgRes.json();
       total = typeof batch.total === "number" ? batch.total : collected.length;
@@ -455,7 +537,7 @@ self.addEventListener("message", (event) => {
   if (data.type === "CACHE_URLS" && Array.isArray(data.urls)) {
     event.waitUntil(cacheUrlList(data.urls));
   } else if (data.type === "START_CHAPTER_DOWNLOAD" && data.payload) {
-    event.waitUntil(runBackgroundDownload(data.payload));
+    event.waitUntil(enqueueBackgroundDownload(data.payload));
   } else if (data.type === "CANCEL_CHAPTER_DOWNLOAD" && data.chapterId) {
     const entry = activeDownloads.get(data.chapterId);
     if (entry) entry.controller.abort();

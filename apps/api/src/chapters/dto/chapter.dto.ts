@@ -29,5 +29,5 @@ export class RegisterImagesDto {
 export class ReorderDto { @IsArray() @ArrayMaxSize(500) @IsString({ each: true }) ids: string[]; }
 export class ImagesQuery {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) from: number = 0;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(30) limit: number = 10;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit: number = 10;
 }
